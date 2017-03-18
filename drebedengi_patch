@@ -1,0 +1,2650 @@
+diff --git a/.gitignore b/.gitignore
+index ebe8029..31783d8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -19,4 +19,5 @@ profile
+ *.moved-aside
+ Breakpoints.xcbkptlist
+ 
+-*.psd
+\ No newline at end of file
++*.psd
++Resources/Kal_src/build/*
+diff --git a/Classes/BaseCoreDataStorage.m b/Classes/BaseCoreDataStorage.m
+index 0a151b5..2879fcb 100644
+--- a/Classes/BaseCoreDataStorage.m
++++ b/Classes/BaseCoreDataStorage.m
+@@ -8,6 +8,7 @@
+ 
+ #import "BaseCoreDataStorage.h"
+ #import "DDLog.h"
++#import "MaxObjectId.h"
+ 
+ static int DDLogLevel = LOG_LEVEL_INFO;
+ #define defaultDDLogLevel  LOG_LEVEL_INFO
+@@ -287,29 +288,7 @@ - (void)saveChanges {
+ }
+ 
+ - (NSManagedObject *)getObjectForName:(NSString *)entityName byId:(long long)Id {
+-    
+-    NSManagedObject * object;
+-    NSEntityDescription * entityDescription = [NSEntityDescription entityForName:entityName inManagedObjectContext:self.managedObjectContext];
+-    
+-    NSFetchRequest *request = [[[NSFetchRequest alloc] init] autorelease];  
+-    [request setEntity:entityDescription];
+-    [request setPredicate:[NSPredicate predicateWithFormat:@"moId = %lld",Id]];
+-    
+-    NSError *error = nil;  
+-    NSArray * objects = [NSMutableArray arrayWithArray:[self.managedObjectContext executeFetchRequest:request error:&error]];
+-    
+-    //    [request release];
+-    if (!objects || [objects count] == 0) { 
+-        object = nil;
+-    }
+-    else {
+-        object = [objects objectAtIndex:0];
+-        if ([objects count] > 1)
+-        {
+-            //DDLogInfo(@"Duplicate object with id : %i", Id);
+-        }
+-    }
+-    return object;
++  return [MaxObjectId getObjectForName:entityName inManagedObjectContext:self.managedObjectContext byId:Id];
+ }
+ 
+ - (NSManagedObject *)getNewObjectForName:(NSString *)entityName {
+diff --git a/Classes/Constants.h b/Classes/Constants.h
+index 7beb14d..8caa857 100644
+--- a/Classes/Constants.h
++++ b/Classes/Constants.h
+@@ -118,6 +118,7 @@ typedef enum {
+     
+     RequestKindDeleteObject,
+     RequestKindGetBalance,
++    RequestKindParseTextData,
+     
+ }  RequestKinds;
+ 
+diff --git a/Classes/DataBaseWork/BaseCoreDataManage.h b/Classes/DataBaseWork/BaseCoreDataManage.h
+index dd778fb..044f4a2 100644
+--- a/Classes/DataBaseWork/BaseCoreDataManage.h
++++ b/Classes/DataBaseWork/BaseCoreDataManage.h
+@@ -37,6 +37,8 @@
+ -(NSArray*) getEntities:(NSString*)entityName byPredicate:(NSPredicate*)predicate;
+ -(NSArray*) getEntities:(NSString*)entityName;
+ 
++-(int)getMaxIdObjectForName:(NSString*)name;
++
+ -(void) stampContextQueue;
+ 
+ @end
+diff --git a/Classes/DataBaseWork/BaseCoreDataManage.m b/Classes/DataBaseWork/BaseCoreDataManage.m
+index 66d7955..617db35 100644
+--- a/Classes/DataBaseWork/BaseCoreDataManage.m
++++ b/Classes/DataBaseWork/BaseCoreDataManage.m
+@@ -7,6 +7,7 @@
+ //
+ 
+ #import "BaseCoreDataManage.h"
++#import "MaxObjectId.h"
+ 
+ @implementation BaseCoreDataManage
+ {
+@@ -308,6 +309,9 @@ -(NSArray*) getEntities:(NSString*)entityName {
+ 
+ 
+ 
++-(int)getMaxIdObjectForName:(NSString*)name {
++    return [MaxObjectId getMaxIdObjectForName:name inManagedObjectContext:self.moContext];
++}
+ 
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+diff --git a/Classes/DataBaseWork/CoreDataManage.h b/Classes/DataBaseWork/CoreDataManage.h
+index 2ffb63d..9656abe 100644
+--- a/Classes/DataBaseWork/CoreDataManage.h
++++ b/Classes/DataBaseWork/CoreDataManage.h
+@@ -124,7 +124,9 @@
+ - (NSMutableArray *)getPurchaseById:(long long)userId;
+ 
+ // Records
++-(Record*)getOrCreateRecord:(NSInteger)internalID;
+ -(void) setRecordList:(NSDictionary*)dict;
++-(void) setListOfRecords:(NSArray<Record*>*)list;
+ -(void) setInitRecordList:(NSDictionary*)dict;
+ -(void)replaceRecordList:(NSArray*)list;
+ -(void) deleteRecordByID:(NSInteger)moid;
+@@ -150,6 +152,9 @@
+ -(void) setBalanceCorrected:(BOOL)corrected;
+ -(SavedBalance*) savedBalanceByRepository:(MyObject*)repository currency:(Currency*)currency;
+ 
++// Sms
++-(NSArray*) getNewSmsHistoryItems;
++
+ // Clear current data
+ -(void) clearCurrentUserData;
+ 
+diff --git a/Classes/DataBaseWork/CoreDataManage.m b/Classes/DataBaseWork/CoreDataManage.m
+index 8e630ce..30775f8 100644
+--- a/Classes/DataBaseWork/CoreDataManage.m
++++ b/Classes/DataBaseWork/CoreDataManage.m
+@@ -12,6 +12,7 @@
+ #import "SyncBase.h"
+ #import "PlaceIconDataProvider.h"
+ #import "Notifications.h"
++#import "SmsHistory.h"
+ typedef enum {
+     ObjectTypeKindSource = 1,
+     ObjectTypekindPlace = 2,
+@@ -1858,7 +1859,59 @@ -(void) setRecordList:(NSDictionary*)dict
+ {
+     
+     NSArray *list = [dict allValues];
++    __weak CoreDataManage *weakSelf = self;
++    [self setRecordListBlock:^Record *(long i) {
++        NSDictionary *elem = [list objectAtIndex:i];
++        NSInteger internalID = [((NSString*)[elem valueForKey:@"id"]) integerValue];
++        Record *record = [weakSelf getOrCreateRecord:internalID];
++        [record setDataFromDictionary:[list objectAtIndex:i]];
++        return record;
++    } count:list.count];
++}
++
++-(void) setListOfRecords:(NSArray<Record*>*)list {
++    __weak CoreDataManage *weakSelf = self;
++  [self setRecordListBlock:^Record *(long i) {
++      Record *record = list[i];
++      ChangeListCD *clist = (ChangeListCD*)[weakSelf getNewManagedObjectForName:@"ChangeListCD"];
++      if (record.isCurrencyChange.boolValue) {
++          clist.typeChanged = @"change";
++          clist.actionId = @(2);
++      } else {
++          if (record.operationType.intValue == 4) {
++              clist.typeChanged = @"move";
++          } else {
++              clist.typeChanged = @"waste";
++          }
++          clist.actionId = @(1);
++      }
++      clist.objectId = record.moId;
++      clist.date = [NSDate date];
++      clist.objectTypeId = [NSNumber numberWithInt:1];
++      clist.userId = [NSNumber numberWithLongLong:gIntUserId];
++      return record;
++  } count:list.count];
++}
++
++-(Record*)getOrCreateRecord:(NSInteger)internalID {
++    Record *record = nil;
++    // to accelerate we create Record here
++    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"moId == %d", internalID];
++    NSArray *entities = [self getEntities:@"Record" byPredicate:predicate];
+     
++    if (entities) {
++        record =  [entities objectAtIndex:0];
++        [self changeBalanceNotSaveForRecord:record add:NO];
++    }
++    else {
++        record = (Record*)[self getNewManagedObjectForName:@"Record"];
++        record.moId = [NSNumber numberWithInteger:internalID];
++        record.user = _currentUser;
++    }
++    return record;
++}
++
++-(void) setRecordListBlock:(Record* (^)(long i))block count:(long)count {
+     NSMutableDictionary *relationsAccount = [NSMutableDictionary dictionary];
+     NSMutableDictionary *relationsBudget = [NSMutableDictionary dictionary];
+     NSMutableDictionary *relationsCurrency = [NSMutableDictionary dictionary];
+@@ -1866,37 +1919,15 @@ -(void) setRecordList:(NSDictionary*)dict
+     @synchronized (PRJ_mutexLockBalance)
+     {
+         
+-        for (int i=0; i < list.count;)
++        for (int i=0; i < count;)
+         {
+             @autoreleasepool
+             {
+                 
+-                for (int j=0; j < 500 && i < list.count; i++, j++)
++                for (int j=0; j < 500 && i < count; i++, j++)
+                 {
+                     
+-                    
+-                    NSDictionary *elem = [list objectAtIndex:i];
+-                    
+-                    NSInteger internalID = [((NSString*)[elem valueForKey:@"id"]) integerValue];
+-                    
+-                    Record *record = nil;
+-                    
+-                    // to accelerate we create Record here
+-                    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"moId == %d", internalID];
+-                    NSArray *entities = [self getEntities:@"Record" byPredicate:predicate];
+-                    
+-                    if (entities) {
+-                        record =  [entities objectAtIndex:0];
+-                        [self changeBalanceNotSaveForRecord:record add:NO];
+-                    }
+-                    else {
+-                        record = (Record*)[self getNewManagedObjectForName:@"Record"];
+-                        record.moId = [NSNumber numberWithInteger:internalID];
+-                        record.user = _currentUser;
+-                    }
+-                    
+-                    
+-                    [record setDataFromDictionary:elem];
++                    Record *record = block(i);
+                     
+                     if ([record.accountId integerValue])
+                     {
+@@ -2840,6 +2871,20 @@ -(BOOL) userIsBalanceCorrected {
+ 
+ 
+ 
++-(NSArray*) getNewSmsHistoryItems {
++    NSSortDescriptor *sort = [NSSortDescriptor sortDescriptorWithKey:@"date" ascending:YES];
++#ifdef DEBUG
++    NSArray *items = [self getEntities:@"SmsHistory"];
++    items = [items sortedArrayUsingDescriptors:[NSArray arrayWithObject:sort]];
++    for (SmsHistory *histItem in items) {
++        NSLog(@"id=%@ text='%@' status=%@ date=%@", histItem.moId, histItem.smsText, histItem.status, histItem.date);
++    }
++#endif
++    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"(status == %@ OR status == %@) AND user == %@",
++                              @(NEW), @(NOT_PREMIUM), self.currentUser];
++    NSArray *histItems = [self getEntities:@"SmsHistory" byPredicate:predicate];
++    return [histItems sortedArrayUsingDescriptors:[NSArray arrayWithObject:sort]];
++}
+ 
+ ///////////////////////////////////////////////////////////////////////////////////////////////////////
+ #pragma mark - Clear base
+diff --git a/Classes/DataProviding/RequestBuilder.h b/Classes/DataProviding/RequestBuilder.h
+index 13c81f5..0e7943e 100644
+--- a/Classes/DataProviding/RequestBuilder.h
++++ b/Classes/DataProviding/RequestBuilder.h
+@@ -7,6 +7,7 @@
+ //
+ 
+ #import <Foundation/Foundation.h>
++#import "SmsNumber.h"
+ 
+ @interface RequestBuilder : NSObject
+ 
+@@ -51,4 +52,6 @@
+ 
+ +(NSMutableURLRequest*)requestSendCrashReporter:(NSString*)crashMessage;
+ 
+++(NSMutableURLRequest*) parseTextData:(NSArray*)textData forSmsNumber:(SmsNumber*)smsNumber;
++
+ @end
+diff --git a/Classes/DataProviding/RequestBuilder.m b/Classes/DataProviding/RequestBuilder.m
+index c0d8d94..e34346e 100644
+--- a/Classes/DataProviding/RequestBuilder.m
++++ b/Classes/DataProviding/RequestBuilder.m
+@@ -61,6 +61,13 @@ @implementation RequestBuilder
+ 
+ static NSString *_userAgentField = nil;
+ 
++#ifdef DEBUG
++RequestKinds debugRequestKind;
++#define DEBUG_REQUEST_KIND(X) debugRequestKind = (X)
++#else
++#define DEBUG_REQUEST_KIND(X)
++#endif
++
+ 
+ /////////////////////////////////////////////////////////////////////////////////////////////
+ #pragma mark - supply functions
+@@ -167,6 +174,16 @@ +(NSString*) requiredArrayStrings: (NSArray *) array {
+     return list;
+ }
+ 
+++(NSString*) requiredListOfStrings: (NSArray*) array {
++  NSString *format = @"<list SOAP-ENC:arrayType=\"xsd:string[%d]\" xsi:type=\"SOAP-ENC:Array\">\n";
++  NSMutableString * list = [NSMutableString stringWithFormat: format, array.count];
++  for (NSString *elem in array) {
++    [list appendFormat: @"<item xsi:type=\"xsd:string\">%@</item>\n", elem];
++  }
++  [list appendString: @"</list>\n"];
++  return list;
++}
++
+ 
+ 
+ 
+@@ -234,6 +251,14 @@ +(NSMutableURLRequest*) makeRequestWithSOAPCore:(NSString*)core {
+     NSString *mes = [NSString stringWithFormat:@"%@%@%@", SOAPMessageHeader, core, SOAPMessageEnd];
+     [req setHTTPBody:[mes dataUsingEncoding:NSUTF8StringEncoding]];
+     
++#ifdef DEBUG
++    if (debugRequestKind == RequestKindParseTextData || debugRequestKind == RequestKindSetRecordList) {
++        NSLog(@"\n------------------------------------------------------------------");
++        NSLog(@"\ncurl --data-ascii '%@' https://www.drebedengi.ru/soap/", mes);
++    }
++    debugRequestKind = RequestKindNone;
++#endif
++    
+     return req;
+ }
+ 
+@@ -438,6 +463,7 @@ +(NSMutableURLRequest*) getAccumList:(NSArray *)objIds
+ 
+ +(NSMutableURLRequest*) setRecordList:(NSArray *)dictlist
+ {
++    DEBUG_REQUEST_KIND(RequestKindSetRecordList);
+     NSString *body = [NSString stringWithString: [self requiredListArrayDictionaries:dictlist]];
+     
+     NSString *SOAPMessageCore = [self createSOAPMessageCore:@"setRecordList" messageCore:body];
+@@ -506,4 +532,18 @@ +(NSMutableURLRequest*) deleteObject:(NSString *)objId  objType:(NSString *)objT
+     return [self makeRequestWithSOAPCore:SOAPMessageCore];
+ }
+ 
+++(NSMutableURLRequest*) parseTextData:(NSArray*)textData forSmsNumber:(SmsNumber*)smsNumber {
++    DEBUG_REQUEST_KIND(RequestKindParseTextData);
++    NSMutableString *body = [NSMutableString string];
++    NSString *list = [NSString stringWithString:[self requiredListOfStrings:textData]];
++    [body appendFormat:@"<defPlaceFromId xsi:type=\"xsd:string\">%@</defPlaceFromId>\n", [smsNumber.placeId stringValue]];
++    [body appendFormat:@"<defCatId xsi:type=\"xsd:string\">%@</defCatId>\n", [smsNumber.categoryId stringValue]];
++    [body appendFormat:@"<defSrcId xsi:type=\"xsd:string\">%@</defSrcId>\n", [smsNumber.sourceId stringValue]];
++    [body appendFormat:@"<defPlaceToId xsi:type=\"xsd:string\">%@</defPlaceToId>\n", [smsNumber.placeToId stringValue]];
++    [body appendString:list];
++    NSString *SOAPMessageCore = [self createSOAPMessageCore:@"parseTextData" messageCore:body];
++    return [self makeRequestWithSOAPCore:SOAPMessageCore];
++}
++
++
+ @end
+diff --git a/Classes/DataProviding/SOAPRequestDataProvider.h b/Classes/DataProviding/SOAPRequestDataProvider.h
+index 3641d17..3253806 100644
+--- a/Classes/DataProviding/SOAPRequestDataProvider.h
++++ b/Classes/DataProviding/SOAPRequestDataProvider.h
+@@ -9,6 +9,7 @@
+ #import "DataProvider.h"
+ #import "XMLParsing.h"
+ #import "RequestBuilder.h"
++#import "SmsNumber.h"
+ 
+ /********
+ typedef enum {
+@@ -75,6 +76,8 @@ typedef enum {
+ -(void) requestSetAccumList:(NSArray *)objIds;
+ -(void) requestGetBalance;
+ 
++- (void)requestParseTextData:(NSArray*)textData forSmsNumber:(SmsNumber*)smsNumber;
++
+ //-(void) requestDeleteObject:(NSString *)objId  objType:(NSString *)objType;
+ 
+ @end
+diff --git a/Classes/DataProviding/SOAPRequestDataProvider.m b/Classes/DataProviding/SOAPRequestDataProvider.m
+index 4774207..5d9b469 100644
+--- a/Classes/DataProviding/SOAPRequestDataProvider.m
++++ b/Classes/DataProviding/SOAPRequestDataProvider.m
+@@ -322,6 +322,12 @@ -(void) requestGetBalance {
+     
+ }
+ 
++- (void)requestParseTextData:(NSArray*)textData forSmsNumber:(SmsNumber*)smsNumber {
++  _currentRequestKind = RequestKindParseTextData;
++  self.resultNodeName = @"parseTextDataReturn";
++  self.request = [RequestBuilder parseTextData:textData forSmsNumber:smsNumber];
++  self.connectionProgressTitle = LOCALIZED(@"Parse SMS text");
++}
+ 
+ 
+ ///////////////////////////////////////////////////////////////////
+diff --git a/Classes/HomeAccounting.xcdatamodeld/HomeAccounting 4.xcdatamodel/contents b/Classes/HomeAccounting.xcdatamodeld/HomeAccounting 4.xcdatamodel/contents
+index 055bb31..bb57675 100644
+--- a/Classes/HomeAccounting.xcdatamodeld/HomeAccounting 4.xcdatamodel/contents	
++++ b/Classes/HomeAccounting.xcdatamodeld/HomeAccounting 4.xcdatamodel/contents	
+@@ -126,6 +126,14 @@
+         <attribute name="name" optional="YES" attributeType="String" syncable="YES"/>
+         <attribute name="userID" optional="YES" attributeType="Integer 64" defaultValueString="0" syncable="YES"/>
+     </entity>
++    <entity name="SmsHistory" syncable="YES">
++        <attribute name="date" optional="YES" attributeType="Date" usesScalarValueType="NO" syncable="YES"/>
++        <attribute name="moId" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="NO" syncable="YES"/>
++        <attribute name="smsText" optional="YES" attributeType="String" syncable="YES"/>
++        <attribute name="status" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="NO" syncable="YES"/>
++        <relationship name="record" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Record" syncable="YES"/>
++        <relationship name="user" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="User" syncable="YES"/>
++    </entity>
+     <entity name="Tags" representedClassName="Tags" syncable="YES">
+         <attribute name="isFamily" optional="YES" attributeType="Boolean" syncable="YES"/>
+         <attribute name="isHidden" optional="YES" attributeType="Boolean" syncable="YES"/>
+@@ -166,5 +174,6 @@
+         <element name="Settings" positionX="-2070" positionY="522" width="128" height="75"/>
+         <element name="Tags" positionX="-1577" positionY="477" width="128" height="133"/>
+         <element name="User" positionX="-1881" positionY="414" width="128" height="253"/>
++        <element name="SmsHistory" positionX="-2043" positionY="90" width="128" height="135"/>
+     </elements>
+ </model>
+\ No newline at end of file
+diff --git a/Classes/HomeAccountingAppDelegate.m b/Classes/HomeAccountingAppDelegate.m
+index a59dff7..57e11b5 100644
+--- a/Classes/HomeAccountingAppDelegate.m
++++ b/Classes/HomeAccountingAppDelegate.m
+@@ -307,6 +307,7 @@ - (void)applicationWillEnterForeground:(UIApplication *)application
+ //    }
+     
+     [FastOperationsLoader loadFastOperations];
++    [syncBase executePasteboardSynchronization];
+ 
+     if ([AppSettingsScanner sharedAppSettings].interval > 0 && !syncBase.userIsDemo)
+     {
+@@ -378,6 +379,7 @@ - (void)applicationDidBecomeActive:(UIApplication *)application
+     
+     
+     [FastOperationsLoader loadFastOperations];
++    [syncBase executePasteboardSynchronization];
+   
+     if (gUserId && ![gUserId isEqualToString:@""] && ![gUserId isEqualToString:@"1000000000539"]) {
+         if([AppSettingsScanner sharedAppSettings].interval > 0) {
+@@ -512,6 +514,7 @@ - (void)setWindowRootView
+         
+         
+         [FastOperationsLoader loadFastOperations];
++        [syncBase executePasteboardSynchronization];
+       
+         if(gIntUserId !=539 && [AppSettingsScanner sharedAppSettings].interval > 0) {
+             periodOfSync = [AppSettingsScanner sharedAppSettings].interval;
+diff --git a/Classes/MaxObjectId.h b/Classes/MaxObjectId.h
+new file mode 100644
+index 0000000..ef604a3
+--- /dev/null
++++ b/Classes/MaxObjectId.h
+@@ -0,0 +1,18 @@
++
++#import <Foundation/Foundation.h>
++#import "CoreData/CoreData.h"
++
++@interface MaxObjectId : NSObject
++
+++ (int)getMaxIdObjectForName:(NSString *)entityName
++      inManagedObjectContext:(NSManagedObjectContext*)context;
++
+++ (int)getMaxIdObjectForName:(NSString *)entityName
++      inManagedObjectContext:(NSManagedObjectContext*)context
++                  forKeyPath:(NSString *)keyPath;
++
+++ (NSManagedObject *)getObjectForName:(NSString *)entityName
++               inManagedObjectContext:(NSManagedObjectContext*)context
++                                 byId:(long long)Id;
++
++@end
+diff --git a/Classes/MaxObjectId.m b/Classes/MaxObjectId.m
+new file mode 100644
+index 0000000..e8a2c6f
+--- /dev/null
++++ b/Classes/MaxObjectId.m
+@@ -0,0 +1,223 @@
++
++#import "MaxObjectId.h"
++
++@implementation MaxObjectId
++
+++ (int)getMaxIdObjectForName:(NSString *)entityName
++      inManagedObjectContext:(NSManagedObjectContext*)context
++                  forKeyPath:(NSString *)keyPath{
++  /*
++   /////////////////////////////////////////////////////
++   Old block for selecting max record id as new client id - generates not unique client ids
++   /////////////////////////////////////////////////////
++   __block int max;
++   dispatch_block_t block = ^{
++   NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
++   NSFetchRequest *request = [[NSFetchRequest alloc] init];
++   NSEntityDescription *entity = [NSEntityDescription entityForName:entityName inManagedObjectContext:self.managedObjectContext];
++   [request setEntity:entity];
++   // Specify that the request should return dictionaries.
++   [request setResultType:NSDictionaryResultType];
++   // Create an expression for the key path.
++   NSExpression *keyPathExpression = [NSExpression expressionForKeyPath:keyPath];       //@"moId"];
++   // Create an expression to represent the minimum value at the key path 'creationDate'
++   NSExpression *maxExpression = [NSExpression expressionForFunction:@"max:" arguments:[NSArray  arrayWithObject:keyPathExpression]];
++   // Create an expression description using the minExpression and returning a date.
++   NSExpressionDescription *expressionDescription = [[NSExpressionDescription alloc] init];
++   // The name is the key that will be used in the dictionary for the return value.
++   
++   [expressionDescription setName:@"maxID"];
++   [expressionDescription setExpression:maxExpression];
++   [expressionDescription setExpressionResultType:NSInteger64AttributeType];
++   // Set the request's properties to fetch just the property represented by the expressions.
++   [request setPropertiesToFetch:[NSArray arrayWithObject:expressionDescription]];
++   // Execute the fetch.
++   NSError *error = nil;
++   NSArray *objects = [self.managedObjectContext executeFetchRequest:request error:&error];
++   
++   max = 0;
++   if (objects == nil) {
++   // Handle the error
++   }
++   else {
++   if ([objects count] > 0) {
++   //DDLogInfo(@"Minimum date: %@", [[objects objectAtIndex:0] valueForKey:@"maxID"]);
++   max = [[[objects objectAtIndex:0] valueForKey:@"maxID"] intValue];
++   }
++   }
++   
++   
++   
++   [expressionDescription release];
++   
++   [request release];
++   [pool drain];
++   };
++   if (dispatch_get_current_queue() == storageQueue)
++   {
++   block();
++   }
++   else
++   {
++   dispatch_sync(storageQueue, block);
++   }
++   return max;*/
++  
++  
++  //get last client_id from user defaults, or initialize it
++  //    NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
++  //    __block int new_client_id;
++  
++  
++  int new_client_id;
++  
++  @synchronized (PRJ_mutexLockIDNumber)
++  {
++    NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
++    
++    
++    if ([standDefaults objectForKey:@"last_client_id"]) {
++      new_client_id = [standDefaults integerForKey:@"last_client_id"];
++    }
++    else {
++      new_client_id = 0;
++    }
++    
++    //increase client_id, check to be unique - iterate id while there is not record with same id
++    new_client_id++;
++      while ([MaxObjectId getObjectForName:entityName inManagedObjectContext:context byId:new_client_id]) {
++      new_client_id++;
++    }
++    
++    //    dispatch_block_t block = ^{
++    //        while ([self getObjectForName:entityName byId:new_client_id]) {
++    //            new_client_id++;
++    //        }
++    //    };
++    //
++    //    if (dispatch_get_current_queue() == storageQueue)
++    //    {
++    //        block();
++    //    }
++    //    else
++    //    {
++    //        dispatch_sync(storageQueue, block);
++    //    }
++    
++    //write new id to defaults
++    [standDefaults setInteger:new_client_id forKey:@"last_client_id"];
++    [standDefaults synchronize];
++  }
++  
++  //return value
++  return new_client_id;
++}
++
+++ (int)getMaxIdObjectForName:(NSString *)entityName
++      inManagedObjectContext:(NSManagedObjectContext*)context{
++  /*
++   /////////////////////////////////////////////////////
++   Old block for selecting max record id as new client id - generates not unique client ids
++   /////////////////////////////////////////////////////
++   NSFetchRequest *request = [[NSFetchRequest alloc] init];
++   NSEntityDescription *entity = [NSEntityDescription entityForName:entityName inManagedObjectContext:managedObjectContext];
++   [request setEntity:entity];
++   // Specify that the request should return dictionaries.
++   [request setResultType:NSDictionaryResultType];
++   // Create an expression for the key path.
++   NSExpression *keyPathExpression = [NSExpression expressionForKeyPath:@"moId"];
++   // Create an expression to represent the minimum value at the key path 'creationDate'
++   NSExpression *maxExpression = [NSExpression expressionForFunction:@"max:" arguments:[NSArray  arrayWithObject:keyPathExpression]];
++   // Create an expression description using the minExpression and returning a date.
++   NSExpressionDescription *expressionDescription = [[NSExpressionDescription alloc] init];
++   // The name is the key that will be used in the dictionary for the return value.
++   
++   [expressionDescription setName:@"maxID"];
++   [expressionDescription setExpression:maxExpression];
++   [expressionDescription setExpressionResultType:NSInteger64AttributeType];
++   // Set the request's properties to fetch just the property represented by the expressions.
++   [request setPropertiesToFetch:[NSArray arrayWithObject:expressionDescription]];
++   // Execute the fetch.
++   NSError *error = nil;
++   NSArray *objects = [managedObjectContext executeFetchRequest:request error:&error];
++   
++   int max = 0;
++   if (objects == nil) {
++   // Handle the error
++   }
++   else {
++   if ([objects count] > 0) {
++   //DDLogInfo(@"Minimum date: %@", [[objects objectAtIndex:0] valueForKey:@"maxID"]);
++   max = [[[objects objectAtIndex:0] valueForKey:@"maxID"] intValue];
++   }
++   }
++   
++   
++   
++   [expressionDescription release];
++   
++   [request release];
++   return max;*/
++  
++  int new_client_id;
++  
++  @synchronized (PRJ_mutexLockIDNumber)
++  {
++    //get last client_id from user defaults, or initialize it
++    NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
++    //    int new_client_id;
++    
++    if ([standDefaults objectForKey:@"last_client_id"]) {
++      new_client_id = [standDefaults integerForKey:@"last_client_id"];
++    }
++    else {
++      new_client_id = 0;
++    }
++    
++    //increase client_id, check to be unique - iterate id while there is not record with same id
++    new_client_id++;
++    
++      while ([MaxObjectId getObjectForName:entityName inManagedObjectContext:context byId:new_client_id]) {
++      new_client_id++;
++    }
++    
++    //write new id to defaults
++    [standDefaults setInteger:new_client_id forKey:@"last_client_id"];
++    [standDefaults synchronize];
++    
++    //return value
++  }
++  
++  return new_client_id;
++}
++
+++ (NSManagedObject *)getObjectForName:(NSString *)entityName
++               inManagedObjectContext:(NSManagedObjectContext*)context
++                                 byId:(long long)Id {
++  
++  NSManagedObject * object;
++  NSEntityDescription * entityDescription = [NSEntityDescription entityForName:entityName inManagedObjectContext:context];
++  
++  NSFetchRequest *request = [[[NSFetchRequest alloc] init] autorelease];
++  [request setEntity:entityDescription];
++  [request setPredicate:[NSPredicate predicateWithFormat:@"moId = %lld",Id]];
++  
++  NSError *error = nil;
++  NSArray * objects = [NSMutableArray arrayWithArray:[context executeFetchRequest:request error:&error]];
++  
++  //    [request release];
++  if (!objects || [objects count] == 0) {
++    object = nil;
++  }
++  else {
++    object = [objects objectAtIndex:0];
++    if ([objects count] > 1)
++    {
++      //DDLogInfo(@"Duplicate object with id : %i", Id);
++    }
++  }
++  return object;
++}
++
++
++@end
+diff --git a/Classes/RequestsManage/SyncBase.h b/Classes/RequestsManage/SyncBase.h
+index 6195e23..bedf33d 100644
+--- a/Classes/RequestsManage/SyncBase.h
++++ b/Classes/RequestsManage/SyncBase.h
+@@ -29,6 +29,7 @@ typedef enum _syncBaseState {
+     SyncBaseStateSendLocalRecordsAndRemovals,
+     SyncBaseStateBalanceProcessing,
+     SyncBaseStateFinalReceivingRevision,
++    SyncBaseStateParseTextData,
+ 
+ }  SyncBaseState;
+ 
+@@ -100,6 +101,7 @@ typedef enum _syncBaseState {
+ -(void) executeCheckStatusForDelegate:(id)delegate;
+ -(void) executeReloadCurrentUserData:(id)delegate;
+ -(void) executeSynchronization:(BOOL)display startState:(SyncBaseState)startState  forDelegate:(id)delegate;
++-(void) executePasteboardSynchronization;
+ -(void) callInQueueCheckPlacesForIconsPresence;
+ //-(void) executeUserRegister:(NSString*)name language:(NSString*)language  forDelegate:(id)delegate;
+ 
+diff --git a/Classes/RequestsManage/SyncBase.m b/Classes/RequestsManage/SyncBase.m
+index 3499146..aaf04ce 100644
+--- a/Classes/RequestsManage/SyncBase.m
++++ b/Classes/RequestsManage/SyncBase.m
+@@ -20,6 +20,8 @@
+ #import "SyncViewController.h"
+ #import "LoginViewController.h"
+ #import "SyncCoreDataStorage.h"
++#import "SmsSynchronization.h"
++#import "NSString+SMS.h"
+ 
+ #define SHOW_SYNC_TITLE_MESSAGE(TITLE, MESSAGE) \
+     [self indicateSyncTitle:LOCALIZED(TITLE) message:LOCALIZED(MESSAGE) cancelable:YES];\
+@@ -45,6 +47,7 @@ @interface SyncBase()
+ 
+ @property (nonatomic, weak) UILabel *labelDisplaySyncStatus;    // being used to show synchronization status
+ @property (nonatomic, weak) UIProgressView *syncProgressView;
++@property (atomic,  strong) NSString *latestSmsText;
+ @end
+ 
+ 
+@@ -1268,6 +1271,9 @@ -(NSString*) requestFinishDescription:(RequestKinds) requestKind
+             description = @"Balance data is received";
+             break;
+             
++        case RequestKindParseTextData:
++            description = @"Parsed text data is received";
++            break;
+                   
+         default:
+             break;
+@@ -2114,7 +2120,7 @@ -(void)getCommonChanges:(ChangeList*)chang
+                     if([key isEqualToString:@"records"])
+                     {
+                         
+-                        Record *rec= [[CoreDataManage shared] getRecordByID:[elem intValue]];
++                        Record *rec= [dbManager getRecordByID:[elem intValue]];
+ 
+                         if(([rec.operationType intValue]==4 || [rec.operationType intValue]==5) && rec.recordLinks!=nil)
+                         {
+@@ -2402,7 +2408,7 @@ -(void) stageCheckStatus
+         
+         AccessStatusDataProvider *accessProvider = (AccessStatusDataProvider*)[providersPool providerByKind:RequestKindGetAccessStatus];
+         if (accessProvider.accessEnabled /*self.userAccessEnabled */)
+-            [self stageWayToContinue];
++            [self stageParseTextData];
+         else
+             [self finishSynchronization:TRUE];
+     }
+@@ -2413,6 +2419,23 @@ -(void) stageCheckStatus
+ }
+ 
+ 
++-(void) stageParseTextData {
++    SmsSynchronization *smsSynchronization = [[SmsSynchronization alloc] initWithDbManager:dbManager];
++    SOAPRequestDataProvider *provider = [smsSynchronization getDataProvider:self];
++    if (provider) {
++        syncBaseState = SyncBaseStateParseTextData;
++        [providersPool addDataProviderAndStart:provider];
++    } else {
++        [self stageWayToContinue];
++    }
++}
++
++-(void) stageSmsSynchronization {
++    DataProvider *provider = [providersPool providerByKind:RequestKindParseTextData];
++    SmsSynchronization *smsSynchronization = [[SmsSynchronization alloc] initWithDbManager:dbManager];
++    [smsSynchronization processParseTextDataReturn:provider.parsedData];
++    [self stageWayToContinue];
++}
+ 
+ -(void) stageWayToContinue
+ {
+@@ -2855,6 +2878,12 @@ -(void)didFinishDataProviding:(DataProvider *)provider
+                     [self stageCheckStatus];
+                 }
+             }
++          
++            else if (syncBaseState == SyncBaseStateParseTextData) {
++
++              [self stageSmsSynchronization];
++
++            }
+             
+             else if (requestKind == RequestKindGetChangeList)
+             {
+@@ -3152,6 +3181,37 @@ - (void)sendErrorMailFromProvider: (SOAPRequestDataProvider*)provider
+ 
+ 
+ 
++- (void)executePasteboardSynchronization {
++  if (!gUserId) return;
++  NSString *pasteboardText = [UIPasteboard generalPasteboard].string;
++  if (pasteboardText && pasteboardText.length > 0) {
++    [self synchronizePasteboardText:pasteboardText];
++  }
++}
++
++- (void)synchronizePasteboardText:(NSString*)text {
++  NSString *smsText = text.smsText;
++  if (smsText.length == 0 || smsText.length > 512) {
++    return;
++  }
++  if (!self.latestSmsText) {
++    self.latestSmsText = [[self currectUserStateDict] valueForKey:@"latestSmsText"];
++    if (!self.latestSmsText) {
++      self.latestSmsText = @"";
++    }
++  }
++  if ([self.latestSmsText isEqualToString:smsText]) {
++    return;
++  }
++  NSDate *date = [NSDate date];
++  self.latestSmsText = smsText;
++  [self userStateSetValue:smsText forKey:@"latestSmsText"];
++  dispatch_async(dbqueue, ^{
++      SmsHistoryStatus status = self.userAccessEnabled ? NEW : NOT_PREMIUM;
++      SmsSynchronization *smsSynchronization = [[SmsSynchronization alloc] initWithDbManager:dbManager];
++      [smsSynchronization addSmsText:smsText forUser:dbManager.currentUser andDate:date andStatus:status];
++  });
++}
+ 
+ @end
+ 
+diff --git a/Classes/SettingsViewController.m b/Classes/SettingsViewController.m
+index cd74602..43d6494 100644
+--- a/Classes/SettingsViewController.m
++++ b/Classes/SettingsViewController.m
+@@ -118,7 +118,7 @@ -(void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *
+             default:
+                 break;
+         }
+-    } else if (indexPath.section == 1) {
++    } else if (indexPath.section == 2) {
+         switch (indexPath.row) {
+             case 2:
+                 [self.rememberPasswordSwitch setOn:!self.rememberPasswordSwitch.isOn animated:YES];
+@@ -194,6 +194,10 @@ -(void)prepareForSegue:(UIStoryboardSegue *)segue sender:(id)sender {
+       controller.fastOperationToOpen = _fastOperationToOpen;
+       _fastOperationToOpen = -1;
+       
++    } else if ([segue.identifier isEqualToString:@"sms_history"]) {
++        
++    } else if ([segue.identifier isEqualToString:@"sms_settings"]) {
++        
+     }
+ }
+ 
+diff --git a/Classes/Sms/NSString+SMS.h b/Classes/Sms/NSString+SMS.h
+new file mode 100644
+index 0000000..99f46a6
+--- /dev/null
++++ b/Classes/Sms/NSString+SMS.h
+@@ -0,0 +1,6 @@
++
++#import <Foundation/Foundation.h>
++
++@interface NSString (SMS)
++@property (readonly) NSString *smsText;
++@end
+diff --git a/Classes/Sms/NSString+SMS.m b/Classes/Sms/NSString+SMS.m
+new file mode 100644
+index 0000000..5c95243
+--- /dev/null
++++ b/Classes/Sms/NSString+SMS.m
+@@ -0,0 +1,17 @@
++
++#import "NSString+SMS.h"
++
++@implementation NSString (SMS)
++- (NSString*)smsText {
++  NSScanner *scanner   = [NSScanner scannerWithString:self];
++  NSMutableString *acc = [[NSMutableString alloc] initWithCapacity:self.length];
++  NSCharacterSet *doNotWant = [NSCharacterSet characterSetWithCharactersInString:@"\n\r\t "];
++  while (!scanner.atEnd) {
++    NSString *tmp = nil;
++    [scanner scanUpToCharactersFromSet:doNotWant intoString:&tmp];
++    [acc appendString:tmp];
++    [acc appendString:@" "];
++  }
++  return [acc stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
++}
++@end
+diff --git a/Classes/Sms/SmsHistory.h b/Classes/Sms/SmsHistory.h
+new file mode 100644
+index 0000000..fa1c20d
+--- /dev/null
++++ b/Classes/Sms/SmsHistory.h
+@@ -0,0 +1,23 @@
++
++#import <Foundation/Foundation.h>
++#import <CoreData/CoreData.h>
++#import "User.h"
++
++typedef enum {
++    /*0*/ NEW,
++    /*1*/ IGNORE_SERVER,
++    /*2*/ NOT_RECOGNIZED,
++    /*3*/ RECOGNIZED_AUTO,
++    /*4*/ RECOGNIZED_RULE,
++    /*5*/ NOT_PREMIUM } SmsHistoryStatus;
++
++@interface SmsHistory : NSManagedObject
++
++@property (nonatomic, retain) NSNumber *moId;
++@property (nonatomic, retain) NSDate   *date;
++@property (nonatomic, retain) NSString *smsText;
++@property (nonatomic, retain) NSNumber *recordId;
++@property (nonatomic, retain) NSNumber *status;
++@property (nonatomic, retain) User     *user;
++
++@end
+diff --git a/Classes/Sms/SmsHistory.m b/Classes/Sms/SmsHistory.m
+new file mode 100644
+index 0000000..4cd0c2e
+--- /dev/null
++++ b/Classes/Sms/SmsHistory.m
+@@ -0,0 +1,13 @@
++
++#import "SmsHistory.h"
++
++@implementation SmsHistory
++
++@dynamic moId;
++@dynamic date;
++@dynamic smsText;
++@dynamic recordId;
++@dynamic status;
++@dynamic user;
++
++@end
+diff --git a/Classes/Sms/SmsNumber.h b/Classes/Sms/SmsNumber.h
+new file mode 100644
+index 0000000..af355da
+--- /dev/null
++++ b/Classes/Sms/SmsNumber.h
+@@ -0,0 +1,15 @@
++
++#import <Foundation/Foundation.h>
++
++@interface SmsNumber : NSObject
++
++@property (strong,nonatomic) NSString *id;
++@property (strong,nonatomic) NSString *userId;
++@property (strong,nonatomic) NSNumber *placeId;
++@property (strong,nonatomic) NSNumber *categoryId;
++@property (strong,nonatomic) NSNumber *sourceId;
++@property (strong,nonatomic) NSNumber *placeToId;
++@property (strong,nonatomic) NSNumber *timezoneOffset;
++@property (strong,nonatomic) NSNumber *saveSmsToComment;
++
++@end
+diff --git a/Classes/Sms/SmsNumber.m b/Classes/Sms/SmsNumber.m
+new file mode 100644
+index 0000000..b23242f
+--- /dev/null
++++ b/Classes/Sms/SmsNumber.m
+@@ -0,0 +1,6 @@
++
++#import "SmsNumber.h"
++
++@implementation SmsNumber
++
++@end
+diff --git a/Classes/SmsSynchronization.h b/Classes/SmsSynchronization.h
+new file mode 100644
+index 0000000..4640c80
+--- /dev/null
++++ b/Classes/SmsSynchronization.h
+@@ -0,0 +1,12 @@
++
++#import <Foundation/Foundation.h>
++#import "SOAPRequestDataProvider.h"
++#import "CoreDataManage.h"
++#import "SmsHistory.h"
++
++@interface SmsSynchronization : NSObject
++- (instancetype)initWithDbManager:(CoreDataManage*)dbManager;
++- (void)processParseTextDataReturn:(NSArray*)list;
++- (void)addSmsText:(NSString*)smsText forUser:(User*)userId andDate:(NSDate*)date andStatus:(SmsHistoryStatus)status;
++- (SOAPRequestDataProvider*)getDataProvider:(id<DataProviderDelegate>)delegate;
++@end
+diff --git a/Classes/SmsSynchronization.m b/Classes/SmsSynchronization.m
+new file mode 100644
+index 0000000..6d29e47
+--- /dev/null
++++ b/Classes/SmsSynchronization.m
+@@ -0,0 +1,197 @@
++
++#import "SmsSynchronization.h"
++#import "UICoreDataStorage.h"
++
++@interface SmsSynchronization ()
++@property (strong,nonatomic) CoreDataManage *dbManager;
++@end
++
++@implementation SmsSynchronization
++
++- (instancetype)initWithDbManager:(CoreDataManage *)dbManager {
++    if (self = [super init]) {
++        _dbManager = dbManager;
++    }
++    return self;
++}
++
+++ (SmsNumber*)smsNumber {
++    NSNumber *defaultWallet = [[UICoreDataStorage sharedUICDStorage] getDefaultWallet].moId;
++    NSNumber *secondWallet  = nil;
++    for (MyObject *obj in [[UICoreDataStorage sharedUICDStorage] getAllRepositoriesWithHiden:NO withDuty:NO]) {
++        if (![obj.moId isEqualToNumber:defaultWallet]) {
++            secondWallet = obj.moId;
++            break;
++        }
++    }
++    NSNumber *sourceId = nil;
++    for (MyObject *obj in [[UICoreDataStorage sharedUICDStorage] getSourceTreeWithHiden:NO withDuty:NO]) {
++        sourceId = obj.moId;
++        break;
++    }
++    SmsNumber *smsNumber = [[[SmsNumber alloc] init] autorelease];
++    smsNumber.placeId    = defaultWallet;
++    smsNumber.categoryId = [[UICoreDataStorage sharedUICDStorage] getDefaultCategory].moId;
++    smsNumber.sourceId   = sourceId;
++    smsNumber.placeToId  = secondWallet;
++    smsNumber.saveSmsToComment = @(YES);
++    smsNumber.timezoneOffset   = @(3);
++    return smsNumber;
++}
++
++- (SOAPRequestDataProvider*)getDataProvider:(id<DataProviderDelegate>)delegate {
++    SOAPRequestDataProvider *provider = nil;
++    NSArray *histItems = [self.dbManager getNewSmsHistoryItems];
++    if (histItems && histItems.count > 0) {
++        NSMutableArray *list = [NSMutableArray arrayWithCapacity:histItems.count];
++        for (SmsHistory *histItem in histItems) {
++            [list addObject:histItem.smsText];
++        }
++        provider = [[SOAPRequestDataProvider alloc] initWithDelegate:delegate];
++        [provider requestParseTextData:list forSmsNumber:[SmsSynchronization smsNumber]];
++    }
++    return provider;
++}
++
+++ (void)markNewItemsAsNotPremium {
++//  RLMRealm *realm = [RLMRealm defaultRealm];
++//  [realm beginWriteTransaction];
++//  for (NSNumber<RLMInt> *x in self.smsHistoryIds) {
++//    [SmsHistory objectForPrimaryKey:x].status = @(NOT_PREMIUM);
++//  }
++//  [realm commitWriteTransaction];
++//  self.smsHistoryIds = nil;
++}
++
++- (void)addSmsText:(NSString*)smsText forUser:(User*)user andDate:(NSDate*)date andStatus:(SmsHistoryStatus)status {
++    SmsHistory *histItem = (SmsHistory*) [self.dbManager getNewManagedObjectForName:@"SmsHistory"];
++    histItem.moId    = @([self.dbManager getMaxIdObjectForName:@"SmsHistory"]);
++    histItem.date    = date;
++    histItem.user    = user;
++    histItem.status  = @(status);
++    histItem.smsText = smsText;
++    [self.dbManager saveData];
++}
++
++- (void)processParseTextDataReturn:(NSArray*)list {
++    NSArray *histItems = [self.dbManager getNewSmsHistoryItems];
++    SmsNumber *smsNumber = [SmsSynchronization smsNumber];
++    NSMutableArray<Record*> *records = [NSMutableArray arrayWithCapacity:list.count];
++    for (int i=0; i < MIN(list.count, histItems.count); ++i) {
++        for (Record *record in [self makeRecord:histItems[i]
++                                   forSmsNumber:smsNumber
++                                           from:list[i]]) {
++            [records addObject:record];
++        }
++    }
++    [self.dbManager setListOfRecords:records];
++}
++
++- (NSArray<Record*>*)makeRecord:(SmsHistory*)histItem
++                   forSmsNumber:(SmsNumber*)smsNumber
++                           from:(NSDictionary*)response {
++    
++    if ([response isKindOfClass:[NSNull class]]) {
++        histItem.status = @(NOT_RECOGNIZED);
++    } else if ([response isKindOfClass:[NSDictionary class]]) {
++        
++        NSDictionary *item = (NSDictionary*)response;
++
++        int type = [item[@"type"] intValue];
++        
++        if (type == 0) {
++            histItem.status = @(NOT_RECOGNIZED);
++        } else if (type == 1) {
++            histItem.status = @(IGNORE_SERVER);
++        } else {
++            
++            int curId = [item[@"cur"] intValue];
++
++            if (![self.dbManager existentCurrencyByID:curId]) {
++                return nil;
++            }
++            
++            NSString *comment = item[@"comment"]; if (!comment) comment = @"";
++            if ([item[@"is_autodetected"] boolValue] &&
++                [smsNumber.saveSmsToComment boolValue] &&
++                ![comment containsString:histItem.smsText]) {
++                comment = [NSString stringWithFormat:@"%@ %@", comment, histItem.smsText];
++            }
++            
++            NSDate *operationDate = nil;
++            if (![item[@"is_defaultdate"] boolValue]) {
++                operationDate = [Record getDateFromString:item[@"date"]];
++                operationDate = [operationDate dateByAddingTimeInterval:smsNumber.timezoneOffset.intValue];
++            } else {
++                operationDate = histItem.date;
++            }
++            
++            double summa = [item[@"sum"] doubleValue] / 100;
++            
++            if ([item[@"is_autodetected"] boolValue]) {
++                histItem.status = @(RECOGNIZED_AUTO);
++            } else {
++                histItem.status = @(RECOGNIZED_RULE);
++            }
++            
++            if (type == 4) {
++                int src_repository_id = [item[@"place_from_id"] intValue];
++                int dst_repository_id = [item[@"place_to_id"] intValue];
++                Record* recordFrom = [self makeRecord:-summa
++                                          currency_id:curId
++                                                 date:operationDate
++                                        repository_id:src_repository_id
++                                          category_id:dst_repository_id
++                                       operation_type:type
++                                              comment:comment];
++                Record* recordTo = [self makeRecord:summa
++                                        currency_id:curId
++                                               date:operationDate
++                                      repository_id:dst_repository_id
++                                        category_id:src_repository_id
++                                     operation_type:type
++                                            comment:comment];
++                recordFrom.moveId = recordTo.moId;
++                recordTo.moveId = recordFrom.moId;
++                return @[recordFrom,recordTo];
++            } else {
++                return @[[self makeRecord:summa
++                              currency_id:curId
++                                     date:operationDate
++                            repository_id:[item[@"place_from_id"] intValue]
++                              category_id:[item[@"cat_id"] intValue]
++                           operation_type:type
++                                  comment:comment]];
++            }
++        }
++    }
++    return nil;
++}
++
++- (Record*)makeRecord:(double)summa
++          currency_id:(int)currency_id
++                 date:(NSDate*)date
++        repository_id:(int)repository_id
++          category_id:(int)category_id
++       operation_type:(int)operation_type
++              comment:(NSString *)comment {
++    int recordId = [self.dbManager getMaxIdObjectForName:@"Record"];
++    Record *record = [self.dbManager getOrCreateRecord:recordId];
++    record.objectId = @(category_id);
++    if (comment != nil) {
++        record.comment = comment;
++    } else {
++        record.comment = @"";
++    }
++    record.moId = @(recordId);
++    record.currencyID = @(currency_id);
++    record.isDuty = category_id == -1 ? @(YES) : @(NO);
++    record.isCurrencyChange = @(NO);
++    record.accountId  = @(repository_id);
++    record.difference = @(summa);
++    record.operationType = @(operation_type);
++    record.operationDate = date;
++    return record;
++}
++
++@end
+diff --git a/Classes/UICoreDataStorage.m b/Classes/UICoreDataStorage.m
+index f36bd9b..cac314e 100644
+--- a/Classes/UICoreDataStorage.m
++++ b/Classes/UICoreDataStorage.m
+@@ -12,6 +12,7 @@
+ #import "ProjectGlobals.h"
+ #import "Notifications.h"
+ #import "SyncBase.h"
++#import "MaxObjectId.h"
+ 
+ static int DDLogLevel = LOG_LEVEL_INFO;
+ #define defaultDDLogLevel  LOG_LEVEL_INFO
+@@ -893,80 +894,7 @@ - (void)deleteAllDataForUser:(NSDictionary *)userDict {
+ 
+ 
+ - (int)getMaxIdObjectForName:(NSString *)entityName {
+-/*
+-/////////////////////////////////////////////////////
+- Old block for selecting max record id as new client id - generates not unique client ids
+-/////////////////////////////////////////////////////
+-     NSFetchRequest *request = [[NSFetchRequest alloc] init];
+-    NSEntityDescription *entity = [NSEntityDescription entityForName:entityName inManagedObjectContext:managedObjectContext];
+-    [request setEntity:entity];
+-    // Specify that the request should return dictionaries.
+-    [request setResultType:NSDictionaryResultType];
+-    // Create an expression for the key path.
+-    NSExpression *keyPathExpression = [NSExpression expressionForKeyPath:@"moId"];
+-    // Create an expression to represent the minimum value at the key path 'creationDate'
+-    NSExpression *maxExpression = [NSExpression expressionForFunction:@"max:" arguments:[NSArray  arrayWithObject:keyPathExpression]];
+-    // Create an expression description using the minExpression and returning a date.
+-    NSExpressionDescription *expressionDescription = [[NSExpressionDescription alloc] init];
+-    // The name is the key that will be used in the dictionary for the return value.     
+-    
+-    [expressionDescription setName:@"maxID"];
+-    [expressionDescription setExpression:maxExpression];
+-    [expressionDescription setExpressionResultType:NSInteger64AttributeType];
+-    // Set the request's properties to fetch just the property represented by the expressions.
+-    [request setPropertiesToFetch:[NSArray arrayWithObject:expressionDescription]];
+-    // Execute the fetch.
+-    NSError *error = nil;
+-    NSArray *objects = [managedObjectContext executeFetchRequest:request error:&error];
+-    
+-    int max = 0;
+-    if (objects == nil) {
+-        // Handle the error
+-    }
+-    else {
+-        if ([objects count] > 0) {
+-            //DDLogInfo(@"Minimum date: %@", [[objects objectAtIndex:0] valueForKey:@"maxID"]);
+-            max = [[[objects objectAtIndex:0] valueForKey:@"maxID"] intValue];
+-        }
+-    }
+-    
+-    
+-    
+-    [expressionDescription release];
+-    
+-    [request release];
+-    return max;*/
+-    
+-    int new_client_id;
+-    
+-    @synchronized (PRJ_mutexLockIDNumber)
+-    {
+-        //get last client_id from user defaults, or initialize it
+-        NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
+-        //    int new_client_id;
+-        
+-        if ([standDefaults objectForKey:@"last_client_id"]) {
+-            new_client_id = [standDefaults integerForKey:@"last_client_id"];
+-        }
+-        else {
+-            new_client_id = 0;
+-        }
+-        
+-        //increase client_id, check to be unique - iterate id while there is not record with same id
+-        new_client_id++;
+-        
+-        while ([self getObjectForName:entityName byId:new_client_id]) {
+-            new_client_id++;
+-        }
+-        
+-        //write new id to defaults
+-        [standDefaults setInteger:new_client_id forKey:@"last_client_id"];
+-        [standDefaults synchronize];
+-        
+-        //return value
+-    }
+-    
+-    return new_client_id;
++  return [MaxObjectId getMaxIdObjectForName:entityName inManagedObjectContext:self.managedObjectContext];
+ }
+ 
+ 
+diff --git a/Classes/UIUpdateStorage.m b/Classes/UIUpdateStorage.m
+index 0ef8710..1ba5cdf 100644
+--- a/Classes/UIUpdateStorage.m
++++ b/Classes/UIUpdateStorage.m
+@@ -10,6 +10,7 @@
+ #import "CDateFunctions.h"
+ #import "DDLog.h"
+ #import "ProjectGlobals.h"
++#import "MaxObjectId.h"
+ 
+ static int DDLogLevel = LOG_LEVEL_INFO;
+ #define defaultDDLogLevel  LOG_LEVEL_INFO
+@@ -684,111 +685,7 @@ - (void)clearChangeListForUserId:(long long)user_id {
+ }
+ 
+ - (int)getMaxIdObjectForName:(NSString *)entityName forKeyPath:(NSString *)keyPath{
+-/*
+-/////////////////////////////////////////////////////
+- Old block for selecting max record id as new client id - generates not unique client ids
+-/////////////////////////////////////////////////////
+-    __block int max;
+-    dispatch_block_t block = ^{
+-        NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
+-        NSFetchRequest *request = [[NSFetchRequest alloc] init];
+-        NSEntityDescription *entity = [NSEntityDescription entityForName:entityName inManagedObjectContext:self.managedObjectContext];
+-        [request setEntity:entity];
+-        // Specify that the request should return dictionaries.
+-        [request setResultType:NSDictionaryResultType];
+-        // Create an expression for the key path.
+-        NSExpression *keyPathExpression = [NSExpression expressionForKeyPath:keyPath];       //@"moId"];
+-        // Create an expression to represent the minimum value at the key path 'creationDate'
+-        NSExpression *maxExpression = [NSExpression expressionForFunction:@"max:" arguments:[NSArray  arrayWithObject:keyPathExpression]];
+-        // Create an expression description using the minExpression and returning a date.
+-        NSExpressionDescription *expressionDescription = [[NSExpressionDescription alloc] init];
+-        // The name is the key that will be used in the dictionary for the return value.     
+-        
+-        [expressionDescription setName:@"maxID"];
+-        [expressionDescription setExpression:maxExpression];
+-        [expressionDescription setExpressionResultType:NSInteger64AttributeType];
+-        // Set the request's properties to fetch just the property represented by the expressions.
+-        [request setPropertiesToFetch:[NSArray arrayWithObject:expressionDescription]];
+-        // Execute the fetch.
+-        NSError *error = nil;
+-        NSArray *objects = [self.managedObjectContext executeFetchRequest:request error:&error];
+-        
+-        max = 0;
+-        if (objects == nil) {
+-            // Handle the error
+-        }
+-        else {
+-            if ([objects count] > 0) {
+-                //DDLogInfo(@"Minimum date: %@", [[objects objectAtIndex:0] valueForKey:@"maxID"]);
+-                max = [[[objects objectAtIndex:0] valueForKey:@"maxID"] intValue];
+-            }
+-        }
+-        
+-        
+-        
+-        [expressionDescription release];
+-        
+-        [request release];
+-        [pool drain];
+-    };
+-    if (dispatch_get_current_queue() == storageQueue)
+-    {
+-        block();
+-    }
+-    else
+-    {
+-        dispatch_sync(storageQueue, block);
+-    }
+-    return max;*/
+-    
+-    
+-    //get last client_id from user defaults, or initialize it
+-//    NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
+-//    __block int new_client_id;
+-
+-    
+-    int new_client_id;
+-    
+-    @synchronized (PRJ_mutexLockIDNumber)
+-    {
+-        NSUserDefaults * standDefaults = [NSUserDefaults standardUserDefaults];
+-
+-        
+-        if ([standDefaults objectForKey:@"last_client_id"]) {
+-            new_client_id = [standDefaults integerForKey:@"last_client_id"];
+-        }
+-        else {
+-            new_client_id = 0;
+-        }
+-        
+-        //increase client_id, check to be unique - iterate id while there is not record with same id
+-        new_client_id++;
+-        while ([self getObjectForName:entityName byId:new_client_id]) {
+-            new_client_id++;
+-        }
+-        
+-        //    dispatch_block_t block = ^{
+-        //        while ([self getObjectForName:entityName byId:new_client_id]) {
+-        //            new_client_id++;
+-        //        }
+-        //    };
+-        //
+-        //    if (dispatch_get_current_queue() == storageQueue)
+-        //    {
+-        //        block();
+-        //    }
+-        //    else
+-        //    {
+-        //        dispatch_sync(storageQueue, block);
+-        //    }
+-        
+-        //write new id to defaults
+-        [standDefaults setInteger:new_client_id forKey:@"last_client_id"];
+-        [standDefaults synchronize];
+-    }
+-    
+-    //return value
+-    return new_client_id;
++  return [MaxObjectId getMaxIdObjectForName:entityName inManagedObjectContext:self.managedObjectContext forKeyPath:keyPath];
+ }
+ 
+ 
+diff --git a/Classes/en.lproj/SettingsBoard.storyboard b/Classes/en.lproj/SettingsBoard.storyboard
+index d60ef90..c259dc6 100644
+--- a/Classes/en.lproj/SettingsBoard.storyboard
++++ b/Classes/en.lproj/SettingsBoard.storyboard
+@@ -1,8 +1,12 @@
+ <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+-<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="6250" systemVersion="13E28" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none">
++<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="11542" systemVersion="15G1217" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" colorMatched="YES">
++    <device id="retina4_7" orientation="portrait">
++        <adaptation id="fullscreen"/>
++    </device>
+     <dependencies>
+         <deployment identifier="iOS"/>
+-        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="6244"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="11524"/>
++        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+     </dependencies>
+     <scenes>
+         <!--Settings-->
+@@ -10,15 +14,17 @@
+             <objects>
+                 <tableViewController storyboardIdentifier="SettingsViewController" id="HJD-C3-QyI" customClass="SettingsViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="grouped" separatorStyle="default" rowHeight="44" sectionHeaderHeight="10" sectionFooterHeight="10" id="XA3-ax-KlU">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                         <color key="backgroundColor" cocoaTouchSystemColor="groupTableViewBackgroundColor"/>
+                         <sections>
+                             <tableViewSection headerTitle="" id="nr2-a6-LvD">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" rowHeight="44" id="sqk-oi-fQ5">
++                                        <rect key="frame" x="0.0" y="35" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="sqk-oi-fQ5" id="bMj-L1-OFQ">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="PIN code" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="kVY-UP-C9B">
+@@ -39,8 +45,10 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="uSL-1S-VOU">
++                                        <rect key="frame" x="0.0" y="79" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="uSL-1S-VOU" id="0cx-mK-J2k">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Touch ID" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="PBf-HP-2Zd">
+@@ -61,8 +69,10 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="PjI-WQ-3F9">
++                                        <rect key="frame" x="0.0" y="123" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="PjI-WQ-3F9" id="vQh-R0-LST">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Server address" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="ObJ-vn-Tfv">
+@@ -75,7 +85,7 @@
+                                                 <textField opaque="NO" clipsSubviews="YES" contentMode="scaleToFill" enabled="NO" contentHorizontalAlignment="left" contentVerticalAlignment="center" minimumFontSize="17" id="2lM-mV-ITr">
+                                                     <rect key="frame" x="129" y="8" width="178" height="28"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+-                                                    <color key="textColor" red="0.63137254899999995" green="0.63137254899999995" blue="0.63137254899999995" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" red="0.63137254899999995" green="0.63137254899999995" blue="0.63137254899999995" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <fontDescription key="fontDescription" name="HelveticaNeue-Light" family="Helvetica Neue" pointSize="14"/>
+                                                     <textInputTraits key="textInputTraits" returnKeyType="done"/>
+                                                     <connections>
+@@ -90,104 +100,168 @@
+                             <tableViewSection headerTitle="" id="8tA-zI-642">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="T0k-t7-egH" detailTextLabel="2gp-Nq-lMc" rowHeight="44" style="IBUITableViewCellStyleValue1" id="QQE-mr-OQO">
++                                        <rect key="frame" x="0.0" y="187" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="QQE-mr-OQO" id="Yh4-hp-1fV">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Synchronization" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="T0k-t7-egH">
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="SMS history" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="T0k-t7-egH">
++                                                    <rect key="frame" x="15" y="12" width="87.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="2gp-Nq-lMc">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+-                                                    <color key="textColor" red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                             </subviews>
+                                         </tableViewCellContentView>
+-                                        <connections>
+-                                            <segue destination="nhs-mX-bn5" kind="push" identifier="syncSegue" id="MXF-QI-XA9"/>
+-                                        </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="CHe-AY-OLE" detailTextLabel="vpO-fE-DLM" style="IBUITableViewCellStyleValue1" id="bvY-ED-n0D">
++                                        <rect key="frame" x="0.0" y="231" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="bvY-ED-n0D" id="o7t-Iv-RLh">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Language" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="CHe-AY-OLE">
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="SMS settings" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="CHe-AY-OLE">
++                                                    <rect key="frame" x="15" y="12" width="96" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="vpO-fE-DLM">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" red="0.33339831233024597" green="0.33131259679794312" blue="0.35380959510803223" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                            </subviews>
++                                        </tableViewCellContentView>
++                                    </tableViewCell>
++                                </cells>
++                            </tableViewSection>
++                            <tableViewSection headerTitle="" id="93a-mj-lJ4">
++                                <cells>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="ZAf-97-J7F" detailTextLabel="xj3-iG-bjD" rowHeight="44" style="IBUITableViewCellStyleValue1" id="OHW-ca-HNd">
++                                        <rect key="frame" x="0.0" y="295" width="375" height="44"/>
++                                        <autoresizingMask key="autoresizingMask"/>
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="OHW-ca-HNd" id="O2L-XY-Yil">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="43.5"/>
++                                            <autoresizingMask key="autoresizingMask"/>
++                                            <subviews>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Synchronization" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="ZAf-97-J7F">
++                                                    <rect key="frame" x="15" y="12" width="117" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="xj3-iG-bjD">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+-                                                    <color key="textColor" red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" red="0.33339831233024597" green="0.33131259679794312" blue="0.35380959510803223" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                         <connections>
+-                                            <segue destination="71u-b8-uDO" kind="push" identifier="langSegue" id="VTw-K0-yvM"/>
++                                            <segue destination="nhs-mX-bn5" kind="push" identifier="syncSegue" id="v9g-wB-D4J"/>
+                                         </connections>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="sTP-5T-S9O">
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="c1S-zt-s6U" detailTextLabel="URc-Ps-LxE" style="IBUITableViewCellStyleValue1" id="izH-ee-y72">
++                                        <rect key="frame" x="0.0" y="339" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="sTP-5T-S9O" id="S8M-PF-Zsl">
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="izH-ee-y72" id="a3T-ra-6M6">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Remember password" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="yqN-Zm-vw4">
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Language" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="c1S-zt-s6U">
++                                                    <rect key="frame" x="15" y="12" width="72" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="URc-Ps-LxE">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" red="0.33339831233024597" green="0.33131259679794312" blue="0.35380959510803223" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                            </subviews>
++                                        </tableViewCellContentView>
++                                        <connections>
++                                            <segue destination="71u-b8-uDO" kind="push" identifier="langSegue" id="IlN-RY-m0Y"/>
++                                        </connections>
++                                    </tableViewCell>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="tne-la-XaE">
++                                        <rect key="frame" x="0.0" y="383" width="375" height="44"/>
++                                        <autoresizingMask key="autoresizingMask"/>
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="tne-la-XaE" id="HjP-iy-xEG">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
++                                            <autoresizingMask key="autoresizingMask"/>
++                                            <subviews>
++                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Remember password" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="uUy-p3-ecP">
+                                                     <rect key="frame" x="14" y="10" width="248" height="24"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+-                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="Yml-Og-QHm">
++                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="u9U-Z5-6wm">
+                                                     <rect key="frame" x="263" y="6" width="51" height="31"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <connections>
+-                                                        <action selector="rememberPasswordClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="6Zs-qD-UTs"/>
++                                                        <action selector="rememberPasswordClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="c3p-aQ-Hwv"/>
+                                                     </connections>
+                                                 </switch>
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="MsJ-Ct-4eF">
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="w9A-4E-jvR">
++                                        <rect key="frame" x="0.0" y="427" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="MsJ-Ct-4eF" id="msI-pS-BXC">
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="w9A-4E-jvR" id="koV-N0-t0N">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Remember fields" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="aRA-QF-Iwz">
++                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Remember fields" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="lsS-Yh-Kai">
+                                                     <rect key="frame" x="14" y="9" width="234" height="25"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+-                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="ZEM-sR-F8C">
++                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="Tda-Kk-Wjl">
+                                                     <rect key="frame" x="263" y="6" width="51" height="31"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <connections>
+-                                                        <action selector="rememberFieldValuesClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="lh9-sz-ED8"/>
++                                                        <action selector="rememberFieldValuesClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="RLw-ZL-0Eb"/>
+                                                     </connections>
+                                                 </switch>
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="XLb-0q-mad" style="IBUITableViewCellStyleDefault" id="Y1J-o1-lg4">
+-                                        <rect key="frame" x="0.0" y="363" width="375" height="44"/>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="fNU-MA-ogZ" style="IBUITableViewCellStyleDefault" id="aNl-Xj-L4v">
++                                        <rect key="frame" x="0.0" y="471" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Y1J-o1-lg4" id="VuH-Ez-rH5">
+-                                            <rect key="frame" x="0.0" y="0.0" width="342" height="43.5"/>
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="aNl-Xj-L4v" id="tjR-R9-mS0">
++                                            <rect key="frame" x="0.0" y="0.0" width="341" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Widget fields" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="XLb-0q-mad">
+-                                                    <rect key="frame" x="15" y="0.0" width="325" height="43.5"/>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Widget fields" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="fNU-MA-ogZ">
++                                                    <rect key="frame" x="16" y="0.0" width="324" height="44"/>
+                                                     <autoresizingMask key="autoresizingMask"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <nil key="textColor"/>
+@@ -196,7 +270,7 @@
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                         <connections>
+-                                            <segue destination="nsX-55-8IS" kind="push" identifier="operationsSegue" id="bHW-dv-0td"/>
++                                            <segue destination="nsX-55-8IS" kind="push" identifier="operationsSegue" id="B63-nL-mnF"/>
+                                         </connections>
+                                     </tableViewCell>
+                                 </cells>
+@@ -209,15 +283,12 @@
+                     </tableView>
+                     <navigationItem key="navigationItem" title="Settings" id="SdO-hD-BL2"/>
+                     <simulatedNavigationBarMetrics key="simulatedTopBarMetrics" prompted="NO"/>
+-                    <simulatedScreenMetrics key="simulatedDestinationMetrics" type="retina4"/>
+                     <connections>
+                         <outlet property="labelTouchId" destination="PBf-HP-2Zd" id="wvN-Ug-uTf"/>
+-                        <outlet property="languageDetailLabel" destination="vpO-fE-DLM" id="P5j-Pi-Soo"/>
++                        <outlet property="languageDetailLabel" destination="URc-Ps-LxE" id="HoG-OR-FCD"/>
+                         <outlet property="passCodeSwitch" destination="EOf-wG-Vam" id="Oey-bI-CN7"/>
+-                        <outlet property="rememberFieldValuesSwitch" destination="ZEM-sR-F8C" id="Lrc-53-fuF"/>
+-                        <outlet property="rememberPasswordSwitch" destination="Yml-Og-QHm" id="GBa-d0-5Oh"/>
+                         <outlet property="serverAddressField" destination="2lM-mV-ITr" id="vK4-jM-0Id"/>
+-                        <outlet property="synchronizationDetailLabel" destination="2gp-Nq-lMc" id="Xv8-aV-lg8"/>
++                        <outlet property="synchronizationDetailLabel" destination="xj3-iG-bjD" id="0dR-fL-1MK"/>
+                         <outlet property="touchIdSwitch" destination="sX3-Wh-HWg" id="7SG-Ks-Map"/>
+                     </connections>
+                 </tableViewController>
+@@ -230,18 +301,21 @@
+             <objects>
+                 <tableViewController id="71u-b8-uDO" customClass="LanguageViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="plain" separatorStyle="default" rowHeight="44" sectionHeaderHeight="22" sectionFooterHeight="22" id="Liz-Nn-p53">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+-                        <color key="backgroundColor" white="1" alpha="1" colorSpace="calibratedWhite"/>
++                        <color key="backgroundColor" red="1" green="0.99989593029022217" blue="0.99996638298034668" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                         <sections>
+                             <tableViewSection id="rbf-Jo-mco">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="MnR-Bh-7JI" rowHeight="44" style="IBUITableViewCellStyleDefault" id="X81-gy-z1R">
++                                        <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="X81-gy-z1R" id="ghh-8I-PhU">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="English" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="MnR-Bh-7JI">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -254,11 +328,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="Clt-RS-gph" rowHeight="44" style="IBUITableViewCellStyleDefault" id="kZP-7W-GeC">
++                                        <rect key="frame" x="0.0" y="44" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="kZP-7W-GeC" id="1L0-p1-xwa">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Russian" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Clt-RS-gph">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -291,18 +368,21 @@
+             <objects>
+                 <tableViewController id="nhs-mX-bn5" customClass="SyncronizationPeriodViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="plain" separatorStyle="default" rowHeight="44" sectionHeaderHeight="22" sectionFooterHeight="22" id="pkA-3G-BUf">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+-                        <color key="backgroundColor" white="1" alpha="1" colorSpace="calibratedWhite"/>
++                        <color key="backgroundColor" red="1" green="0.99989593029022217" blue="0.99996638298034668" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                         <sections>
+                             <tableViewSection id="5Iq-PQ-x1T">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="Bvy-vC-et6" style="IBUITableViewCellStyleDefault" id="W6k-Uc-rP7">
++                                        <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="W6k-Uc-rP7" id="4kG-Yp-RiW">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="None" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Bvy-vC-et6">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -315,11 +395,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="LHp-aq-ZqP" style="IBUITableViewCellStyleDefault" id="aaH-rO-5Rd">
++                                        <rect key="frame" x="0.0" y="44" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="aaH-rO-5Rd" id="vZ4-hb-vNj">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Every minute" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="LHp-aq-ZqP">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -332,11 +415,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="KvD-v8-7Qf" style="IBUITableViewCellStyleDefault" id="diX-Ia-tTX">
++                                        <rect key="frame" x="0.0" y="88" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="diX-Ia-tTX" id="uMf-UE-Dcd">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Every 2 minutes" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="KvD-v8-7Qf">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -349,11 +435,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="whC-A2-sBm" style="IBUITableViewCellStyleDefault" id="fME-ub-NFO">
++                                        <rect key="frame" x="0.0" y="132" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="fME-ub-NFO" id="TEo-8r-6hv">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Every 5 minutes" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="whC-A2-sBm">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -366,11 +455,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="Bd1-Bf-RiH" style="IBUITableViewCellStyleDefault" id="HJR-lr-LHS">
++                                        <rect key="frame" x="0.0" y="176" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="HJR-lr-LHS" id="Zsq-ly-j9Z">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Every 10 minutes" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Bd1-Bf-RiH">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -383,11 +475,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="KGq-0i-cFq" style="IBUITableViewCellStyleDefault" id="yVJ-xC-tum">
++                                        <rect key="frame" x="0.0" y="220" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="yVJ-xC-tum" id="95M-Qn-sB4">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Every hour" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="KGq-0i-cFq">
++                                                    <rect key="frame" x="16" y="0.0" width="344" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -553,7 +648,7 @@
+                             <tableViewSection headerTitle="4 operation" id="Z05-ft-c76">
+                                 <cells>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="DRh-72-Shd">
+-                                        <rect key="frame" x="0.0" y="751.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="752" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="DRh-72-Shd" id="mrc-Q5-GE5">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -561,7 +656,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="Dff-Es-j8S">
+-                                        <rect key="frame" x="0.0" y="795.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="796" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Dff-Es-j8S" id="q4g-h8-RkK">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -569,7 +664,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="boi-Us-nhb">
+-                                        <rect key="frame" x="0.0" y="839.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="840" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="boi-Us-nhb" id="u8V-Kh-hAc">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -577,7 +672,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="YIq-od-7W0">
+-                                        <rect key="frame" x="0.0" y="883.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="884" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="YIq-od-7W0" id="zvi-3S-TAB">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -589,7 +684,7 @@
+                             <tableViewSection headerTitle="5 operation" id="FPg-i0-gWw">
+                                 <cells>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="B3n-5l-wOo">
+-                                        <rect key="frame" x="0.0" y="983.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="984" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="B3n-5l-wOo" id="cyf-eu-x3A">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -597,7 +692,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="00m-ic-Zpn">
+-                                        <rect key="frame" x="0.0" y="1027.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1028" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="00m-ic-Zpn" id="wiB-AG-Gb7">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -605,7 +700,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="BA9-gI-Qmq">
+-                                        <rect key="frame" x="0.0" y="1071.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1072" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="BA9-gI-Qmq" id="aqO-8w-9NC">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -613,7 +708,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="rka-FH-usZ">
+-                                        <rect key="frame" x="0.0" y="1115.5" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1116" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="rka-FH-usZ" id="DBV-tL-ocS">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -638,6 +733,6 @@
+     <simulatedMetricsContainer key="defaultSimulatedMetrics">
+         <simulatedStatusBarMetrics key="statusBar"/>
+         <simulatedOrientationMetrics key="orientation"/>
+-        <simulatedScreenMetrics key="destination" type="retina4"/>
++        <simulatedScreenMetrics key="destination" type="retina4_7.fullscreen"/>
+     </simulatedMetricsContainer>
+ </document>
+diff --git a/Classes/ru.lproj/SettingsBoard.storyboard b/Classes/ru.lproj/SettingsBoard.storyboard
+index 350a375..ecd3175 100644
+--- a/Classes/ru.lproj/SettingsBoard.storyboard
++++ b/Classes/ru.lproj/SettingsBoard.storyboard
+@@ -1,8 +1,12 @@
+ <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+-<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="6250" systemVersion="14A389" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none">
++<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="11542" systemVersion="15G1217" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" colorMatched="YES">
++    <device id="retina4_7" orientation="portrait">
++        <adaptation id="fullscreen"/>
++    </device>
+     <dependencies>
+         <deployment identifier="iOS"/>
+-        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="6244"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="11524"/>
++        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+     </dependencies>
+     <scenes>
+         <!--Настройки-->
+@@ -10,15 +14,17 @@
+             <objects>
+                 <tableViewController storyboardIdentifier="SettingsViewController" id="HJD-C3-QyI" customClass="SettingsViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="grouped" separatorStyle="default" rowHeight="44" sectionHeaderHeight="10" sectionFooterHeight="10" id="XA3-ax-KlU">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                         <color key="backgroundColor" cocoaTouchSystemColor="groupTableViewBackgroundColor"/>
+                         <sections>
+                             <tableViewSection headerTitle="" id="nr2-a6-LvD">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" rowHeight="44" id="sqk-oi-fQ5">
++                                        <rect key="frame" x="0.0" y="35" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="sqk-oi-fQ5" id="bMj-L1-OFQ">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="ПИН код" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="kVY-UP-C9B">
+@@ -39,8 +45,10 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="uSL-1S-VOU">
++                                        <rect key="frame" x="0.0" y="79" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="uSL-1S-VOU" id="0cx-mK-J2k">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Touch ID" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="PBf-HP-2Zd">
+@@ -61,8 +69,10 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="l2d-OV-T7v">
++                                        <rect key="frame" x="0.0" y="123" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="l2d-OV-T7v" id="6tF-GZ-0Kx">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Адрес сервера" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="dsp-RA-2AV">
+@@ -75,7 +85,7 @@
+                                                 <textField opaque="NO" clipsSubviews="YES" contentMode="scaleToFill" enabled="NO" contentHorizontalAlignment="left" contentVerticalAlignment="center" minimumFontSize="17" id="gm2-dv-Wr6">
+                                                     <rect key="frame" x="134" y="8" width="178" height="28"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+-                                                    <color key="textColor" red="0.63137254899999995" green="0.63137254899999995" blue="0.63137254899999995" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" red="0.56373953819274902" green="0.56372267007827759" blue="0.56373220682144165" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <fontDescription key="fontDescription" name="HelveticaNeue-Light" family="Helvetica Neue" pointSize="14"/>
+                                                     <textInputTraits key="textInputTraits" returnKeyType="done"/>
+                                                     <connections>
+@@ -90,86 +100,150 @@
+                             <tableViewSection headerTitle="" id="8tA-zI-642">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="T0k-t7-egH" detailTextLabel="2gp-Nq-lMc" rowHeight="44" style="IBUITableViewCellStyleValue1" id="QQE-mr-OQO">
++                                        <rect key="frame" x="0.0" y="187" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="QQE-mr-OQO" id="Yh4-hp-1fV">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Синхронизация" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="T0k-t7-egH">
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="SMS история" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="T0k-t7-egH">
++                                                    <rect key="frame" x="15" y="12" width="99.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="2gp-Nq-lMc">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+-                                                    <color key="textColor" red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" red="0.48361128568649292" green="0.48291862010955811" blue="0.50435942411422729" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                             </subviews>
+                                         </tableViewCellContentView>
+-                                        <connections>
+-                                            <segue destination="nhs-mX-bn5" kind="push" identifier="syncSegue" id="MXF-QI-XA9"/>
+-                                        </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="CHe-AY-OLE" detailTextLabel="vpO-fE-DLM" style="IBUITableViewCellStyleValue1" id="bvY-ED-n0D">
++                                        <rect key="frame" x="0.0" y="231" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="bvY-ED-n0D" id="o7t-Iv-RLh">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Язык" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="CHe-AY-OLE">
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="SMS настройки" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="CHe-AY-OLE">
++                                                    <rect key="frame" x="15" y="12" width="118" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="vpO-fE-DLM">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" red="0.48361128568649292" green="0.48291862010955811" blue="0.50435942411422729" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                            </subviews>
++                                        </tableViewCellContentView>
++                                    </tableViewCell>
++                                </cells>
++                            </tableViewSection>
++                            <tableViewSection headerTitle="" id="QE0-11-Din">
++                                <cells>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="ZC7-Pd-09s" detailTextLabel="Lan-wK-bqh" rowHeight="44" style="IBUITableViewCellStyleValue1" id="cdd-2H-ho1">
++                                        <rect key="frame" x="0.0" y="295" width="375" height="44"/>
++                                        <autoresizingMask key="autoresizingMask"/>
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="cdd-2H-ho1" id="Yrd-Lv-pMm">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="44"/>
++                                            <autoresizingMask key="autoresizingMask"/>
++                                            <subviews>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Синхронизация" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="ZC7-Pd-09s">
++                                                    <rect key="frame" x="15" y="12" width="120" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Lan-wK-bqh">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" red="0.48361128568649292" green="0.48291862010955811" blue="0.50435942411422729" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                            </subviews>
++                                        </tableViewCellContentView>
++                                        <connections>
++                                            <segue destination="nhs-mX-bn5" kind="push" identifier="syncSegue" id="7PF-gG-3J0"/>
++                                        </connections>
++                                    </tableViewCell>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="Kwa-LF-1Lo" detailTextLabel="2Mb-1O-WFO" style="IBUITableViewCellStyleValue1" id="eMC-Qh-h2t">
++                                        <rect key="frame" x="0.0" y="339" width="375" height="44"/>
++                                        <autoresizingMask key="autoresizingMask"/>
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="eMC-Qh-h2t" id="h5G-zq-Ws6">
++                                            <rect key="frame" x="0.0" y="0.0" width="342" height="44"/>
++                                            <autoresizingMask key="autoresizingMask"/>
++                                            <subviews>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Язык" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Kwa-LF-1Lo">
++                                                    <rect key="frame" x="15" y="12" width="38.5" height="19.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+-                                                    <color key="textColor" red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="calibratedRGB"/>
++                                                    <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
++                                                    <nil key="highlightedColor"/>
++                                                </label>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Detail" textAlignment="right" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="2Mb-1O-WFO">
++                                                    <rect key="frame" x="298.5" y="12" width="41.5" height="19.5"/>
++                                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
++                                                    <fontDescription key="fontDescription" type="system" pointSize="16"/>
++                                                    <color key="textColor" red="0.48361128568649292" green="0.48291862010955811" blue="0.50435942411422729" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                         <connections>
+-                                            <segue destination="71u-b8-uDO" kind="push" identifier="langSegue" id="VTw-K0-yvM"/>
++                                            <segue destination="71u-b8-uDO" kind="push" identifier="langSegue" id="nvQ-aH-zXV"/>
+                                         </connections>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="sTP-5T-S9O">
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="Vuf-GF-Kt5">
++                                        <rect key="frame" x="0.0" y="383" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="sTP-5T-S9O" id="S8M-PF-Zsl">
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Vuf-GF-Kt5" id="9Z2-Nr-50a">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Запомнить пароль" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="yqN-Zm-vw4">
++                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Запомнить пароль" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="aBN-Bx-Xgt">
+                                                     <rect key="frame" x="15" y="9" width="204" height="25"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+                                                     <nil key="highlightedColor"/>
+                                                 </label>
+-                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="Yml-Og-QHm">
++                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="L0g-M2-vDO">
+                                                     <rect key="frame" x="263" y="6" width="51" height="31"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <connections>
+-                                                        <action selector="rememberPasswordClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="6Zs-qD-UTs"/>
++                                                        <action selector="rememberPasswordClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="Kcl-GR-Dyf"/>
+                                                     </connections>
+                                                 </switch>
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="MsJ-Ct-4eF">
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="Yox-qp-iMx">
++                                        <rect key="frame" x="0.0" y="427" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="MsJ-Ct-4eF" id="msI-pS-BXC">
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Yox-qp-iMx" id="i7Q-4e-dL4">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="ZEM-sR-F8C">
++                                                <switch opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="750" verticalHuggingPriority="750" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="BSX-x6-QbZ">
+                                                     <rect key="frame" x="263" y="6" width="51" height="31"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <connections>
+-                                                        <action selector="rememberFieldValuesClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="lh9-sz-ED8"/>
++                                                        <action selector="rememberFieldValuesClick:" destination="HJD-C3-QyI" eventType="valueChanged" id="v2T-bw-LEE"/>
+                                                     </connections>
+                                                 </switch>
+-                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Запоминать поля" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="aRA-QF-Iwz">
++                                                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Запоминать поля" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="dYm-F7-1Or">
+                                                     <rect key="frame" x="15" y="7" width="234" height="30"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+@@ -179,15 +253,15 @@
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+-                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="XJX-BN-jGI" style="IBUITableViewCellStyleDefault" id="uco-mo-2Tf">
+-                                        <rect key="frame" x="0.0" y="363" width="375" height="44"/>
++                                    <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="4tj-TS-hkf" style="IBUITableViewCellStyleDefault" id="9ZE-zF-yDn">
++                                        <rect key="frame" x="0.0" y="471" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+-                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="uco-mo-2Tf" id="pz3-3A-NXJ">
++                                        <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="9ZE-zF-yDn" id="dnh-hb-RqO">
+                                             <rect key="frame" x="0.0" y="0.0" width="341" height="43.5"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Поля для виджета" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="XJX-BN-jGI" userLabel="Часто используемые операции">
+-                                                    <rect key="frame" x="15" y="0.0" width="325" height="43.5"/>
++                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Поля для виджета" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="4tj-TS-hkf" userLabel="Часто используемые операции">
++                                                    <rect key="frame" x="16" y="0.0" width="324" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <nil key="textColor"/>
+@@ -196,7 +270,7 @@
+                                             </subviews>
+                                         </tableViewCellContentView>
+                                         <connections>
+-                                            <segue destination="Wdk-x7-YBR" kind="push" identifier="operationsSegue" id="xhj-N0-pzp"/>
++                                            <segue destination="Wdk-x7-YBR" kind="push" identifier="operationsSegue" id="pno-wg-j9M"/>
+                                         </connections>
+                                     </tableViewCell>
+                                 </cells>
+@@ -209,15 +283,12 @@
+                     </tableView>
+                     <navigationItem key="navigationItem" title="Настройки" id="SdO-hD-BL2"/>
+                     <simulatedNavigationBarMetrics key="simulatedTopBarMetrics" prompted="NO"/>
+-                    <simulatedScreenMetrics key="simulatedDestinationMetrics" type="retina4"/>
+                     <connections>
+                         <outlet property="labelTouchId" destination="PBf-HP-2Zd" id="7Qk-lh-P1x"/>
+-                        <outlet property="languageDetailLabel" destination="vpO-fE-DLM" id="P5j-Pi-Soo"/>
++                        <outlet property="languageDetailLabel" destination="2Mb-1O-WFO" id="lbc-8f-SbF"/>
+                         <outlet property="passCodeSwitch" destination="EOf-wG-Vam" id="03j-1a-nbD"/>
+-                        <outlet property="rememberFieldValuesSwitch" destination="ZEM-sR-F8C" id="rAH-9w-T7I"/>
+-                        <outlet property="rememberPasswordSwitch" destination="Yml-Og-QHm" id="HbZ-Pu-hdt"/>
+                         <outlet property="serverAddressField" destination="gm2-dv-Wr6" id="1ZZ-rl-LPe"/>
+-                        <outlet property="synchronizationDetailLabel" destination="2gp-Nq-lMc" id="Xv8-aV-lg8"/>
++                        <outlet property="synchronizationDetailLabel" destination="Lan-wK-bqh" id="XJa-uv-Saw"/>
+                         <outlet property="touchIdSwitch" destination="G8Y-oi-x5d" id="3af-L0-4c0"/>
+                     </connections>
+                 </tableViewController>
+@@ -230,18 +301,21 @@
+             <objects>
+                 <tableViewController id="71u-b8-uDO" customClass="LanguageViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="plain" separatorStyle="default" rowHeight="44" sectionHeaderHeight="22" sectionFooterHeight="22" id="Liz-Nn-p53">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+-                        <color key="backgroundColor" white="1" alpha="1" colorSpace="calibratedWhite"/>
++                        <color key="backgroundColor" red="1" green="0.99997437000274658" blue="0.99999129772186279" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                         <sections>
+                             <tableViewSection id="rbf-Jo-mco">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="checkmark" indentationWidth="10" textLabel="MnR-Bh-7JI" rowHeight="44" style="IBUITableViewCellStyleDefault" id="X81-gy-z1R">
++                                        <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="X81-gy-z1R" id="ghh-8I-PhU">
++                                            <rect key="frame" x="0.0" y="0.0" width="336" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Английский" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="MnR-Bh-7JI">
++                                                    <rect key="frame" x="15" y="0.0" width="321" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -254,11 +328,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" accessoryType="checkmark" indentationWidth="10" textLabel="Clt-RS-gph" rowHeight="44" style="IBUITableViewCellStyleDefault" id="kZP-7W-GeC">
++                                        <rect key="frame" x="0.0" y="44" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="kZP-7W-GeC" id="1L0-p1-xwa">
++                                            <rect key="frame" x="0.0" y="0.0" width="336" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Русский" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Clt-RS-gph">
++                                                    <rect key="frame" x="15" y="0.0" width="321" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -291,18 +368,21 @@
+             <objects>
+                 <tableViewController id="nhs-mX-bn5" customClass="SyncronizationPeriodViewController" sceneMemberID="viewController">
+                     <tableView key="view" clipsSubviews="YES" contentMode="scaleToFill" alwaysBounceVertical="YES" dataMode="static" style="plain" separatorStyle="default" rowHeight="44" sectionHeaderHeight="22" sectionFooterHeight="22" id="pkA-3G-BUf">
+-                        <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
++                        <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+-                        <color key="backgroundColor" white="1" alpha="1" colorSpace="calibratedWhite"/>
++                        <color key="backgroundColor" red="1" green="0.99997437000274658" blue="0.99999129772186279" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                         <sections>
+                             <tableViewSection id="5Iq-PQ-x1T">
+                                 <cells>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="Bvy-vC-et6" style="IBUITableViewCellStyleDefault" id="W6k-Uc-rP7">
++                                        <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="W6k-Uc-rP7" id="4kG-Yp-RiW">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Нет" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Bvy-vC-et6">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -315,11 +395,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="LHp-aq-ZqP" style="IBUITableViewCellStyleDefault" id="aaH-rO-5Rd">
++                                        <rect key="frame" x="0.0" y="44" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="aaH-rO-5Rd" id="vZ4-hb-vNj">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Раз в 1 мин" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="LHp-aq-ZqP">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -332,11 +415,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="KvD-v8-7Qf" style="IBUITableViewCellStyleDefault" id="diX-Ia-tTX">
++                                        <rect key="frame" x="0.0" y="88" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="diX-Ia-tTX" id="uMf-UE-Dcd">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Раз в 2 мин" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="KvD-v8-7Qf">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -349,11 +435,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="whC-A2-sBm" style="IBUITableViewCellStyleDefault" id="fME-ub-NFO">
++                                        <rect key="frame" x="0.0" y="132" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="fME-ub-NFO" id="TEo-8r-6hv">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Раз в 5 мин" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="whC-A2-sBm">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -366,11 +455,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="Bd1-Bf-RiH" style="IBUITableViewCellStyleDefault" id="HJR-lr-LHS">
++                                        <rect key="frame" x="0.0" y="176" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="HJR-lr-LHS" id="Zsq-ly-j9Z">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Раз в 10 мин" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Bd1-Bf-RiH">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -383,11 +475,14 @@
+                                         </connections>
+                                     </tableViewCell>
+                                     <tableViewCell contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" textLabel="KGq-0i-cFq" style="IBUITableViewCellStyleDefault" id="yVJ-xC-tum">
++                                        <rect key="frame" x="0.0" y="220" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="yVJ-xC-tum" id="95M-Qn-sB4">
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                             <subviews>
+                                                 <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" text="Раз в 1 час" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="KGq-0i-cFq">
++                                                    <rect key="frame" x="15" y="0.0" width="345" height="43.5"/>
+                                                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                                                     <fontDescription key="fontDescription" type="system" pointSize="16"/>
+                                                     <color key="textColor" cocoaTouchSystemColor="darkTextColor"/>
+@@ -430,7 +525,7 @@
+                                         <rect key="frame" x="0.0" y="56" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="em7-71-m7j" id="Soq-1E-Cv6">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+@@ -438,7 +533,7 @@
+                                         <rect key="frame" x="0.0" y="100" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="S0E-Fe-bCf" id="zan-7d-rKh">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+@@ -446,7 +541,7 @@
+                                         <rect key="frame" x="0.0" y="144" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="mdq-dO-NXo" id="4Bd-nO-bqx">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+@@ -463,26 +558,26 @@
+                             <tableViewSection headerTitle="Вторая операция" id="5Yu-i0-cNR">
+                                 <cells>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="asX-cF-U0c">
+-                                        <rect key="frame" x="0.0" y="244" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="288" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="asX-cF-U0c" id="HRz-IC-c6w">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="q6h-4e-Mhi">
+-                                        <rect key="frame" x="0.0" y="288" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="332" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="q6h-4e-Mhi" id="ejP-LI-FXR">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="Sat-Nk-N1u">
+-                                        <rect key="frame" x="0.0" y="332" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="376" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Sat-Nk-N1u" id="VA5-Ly-Fig">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+@@ -499,26 +594,26 @@
+                             <tableViewSection headerTitle="Третья операция" id="Nrk-fA-cEA">
+                                 <cells>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="rwK-Hx-XWe">
+-                                        <rect key="frame" x="0.0" y="432" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="520" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="rwK-Hx-XWe" id="btj-uy-TCa">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="VIC-cy-Fke">
+-                                        <rect key="frame" x="0.0" y="476" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="564" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="VIC-cy-Fke" id="FfS-gA-mbP">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="A4S-9H-7g5">
+-                                        <rect key="frame" x="0.0" y="520" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="608" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="A4S-9H-7g5" id="dVs-RU-1zJ">
+-                                            <rect key="frame" x="0.0" y="0.0" width="375" height="43"/>
++                                            <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+                                             <autoresizingMask key="autoresizingMask"/>
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+@@ -607,7 +702,7 @@
+                             <tableViewSection headerTitle="Шестая операция" id="WWI-KX-B8O">
+                                 <cells>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="Q3f-lO-hNF">
+-                                        <rect key="frame" x="0.0" y="984" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1216" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="Q3f-lO-hNF" id="Tor-qN-1ih">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -615,7 +710,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="4q6-y5-WxL">
+-                                        <rect key="frame" x="0.0" y="1028" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1260" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="4q6-y5-WxL" id="Bru-b3-NGd">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -623,7 +718,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="luX-Ti-VDe">
+-                                        <rect key="frame" x="0.0" y="1072" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1304" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="luX-Ti-VDe" id="LOo-tY-TqM">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -631,7 +726,7 @@
+                                         </tableViewCellContentView>
+                                     </tableViewCell>
+                                     <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" selectionStyle="default" indentationWidth="10" id="hcK-bu-dST">
+-                                        <rect key="frame" x="0.0" y="1116" width="375" height="44"/>
++                                        <rect key="frame" x="0.0" y="1348" width="375" height="44"/>
+                                         <autoresizingMask key="autoresizingMask"/>
+                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" tableViewCell="hcK-bu-dST" id="Vrb-tL-ehK">
+                                             <rect key="frame" x="0.0" y="0.0" width="375" height="44"/>
+@@ -674,6 +769,6 @@
+     <simulatedMetricsContainer key="defaultSimulatedMetrics">
+         <simulatedStatusBarMetrics key="statusBar"/>
+         <simulatedOrientationMetrics key="orientation"/>
+-        <simulatedScreenMetrics key="destination" type="retina4"/>
++        <simulatedScreenMetrics key="destination" type="retina4_7.fullscreen"/>
+     </simulatedMetricsContainer>
+ </document>
+diff --git a/HomeAccounting.xcodeproj/project.pbxproj b/HomeAccounting.xcodeproj/project.pbxproj
+index e405722..434573b 100644
+--- a/HomeAccounting.xcodeproj/project.pbxproj
++++ b/HomeAccounting.xcodeproj/project.pbxproj
+@@ -740,18 +740,23 @@
+ 		F50AE6C31E28FB1800AC1A65 /* OperationsViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = F50AE6C21E28FB1800AC1A65 /* OperationsViewController.m */; };
+ 		F50AE6C61E294A1C00AC1A65 /* FastOperations.m in Sources */ = {isa = PBXBuildFile; fileRef = F50AE6C51E294A1C00AC1A65 /* FastOperations.m */; };
+ 		F50BDFAD1E2DB2F00055E65D /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 9D8AE4551373CE33005A5A5E /* Localizable.strings */; };
++		F53335661E7C701300E171E6 /* MaxObjectId.m in Sources */ = {isa = PBXBuildFile; fileRef = F53335651E7C701300E171E6 /* MaxObjectId.m */; };
+ 		F55A5D551E2BF778003D3E21 /* FastOperations.m in Sources */ = {isa = PBXBuildFile; fileRef = F50AE6C51E294A1C00AC1A65 /* FastOperations.m */; };
+ 		F56D105D1E1E541000ADAB7A /* NotificationCenter.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F56D105C1E1E540F00ADAB7A /* NotificationCenter.framework */; };
+ 		F56D10611E1E541000ADAB7A /* TodayViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = F56D10601E1E541000ADAB7A /* TodayViewController.m */; };
+ 		F56D10641E1E541000ADAB7A /* MainInterface.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = F56D10621E1E541000ADAB7A /* MainInterface.storyboard */; };
+ 		F56D10681E1E541000ADAB7A /* HomeAccountingTodayExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F56D105B1E1E540F00ADAB7A /* HomeAccountingTodayExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+ 		F56D10791E1E582200ADAB7A /* Digits.m in Sources */ = {isa = PBXBuildFile; fileRef = F56D10781E1E582200ADAB7A /* Digits.m */; };
++		F57048831E7827FC00FF4F08 /* NSString+SMS.m in Sources */ = {isa = PBXBuildFile; fileRef = F57048821E7827FC00FF4F08 /* NSString+SMS.m */; };
++		F570488C1E78327000FF4F08 /* SmsHistory.m in Sources */ = {isa = PBXBuildFile; fileRef = F570488B1E78327000FF4F08 /* SmsHistory.m */; };
++		F570488F1E783DF800FF4F08 /* SmsSynchronization.m in Sources */ = {isa = PBXBuildFile; fileRef = F570488E1E783DF800FF4F08 /* SmsSynchronization.m */; };
+ 		F575C1D01E4E69B8000FEADE /* PleaseLoginView.xib in Resources */ = {isa = PBXBuildFile; fileRef = F575C1CF1E4E69B8000FEADE /* PleaseLoginView.xib */; };
+ 		F575C1D31E4E6A2E000FEADE /* PleaseLoginView.m in Sources */ = {isa = PBXBuildFile; fileRef = F575C1D21E4E6A2E000FEADE /* PleaseLoginView.m */; };
+ 		F575C1D51E4E7349000FEADE /* CompactView.xib in Resources */ = {isa = PBXBuildFile; fileRef = F575C1D41E4E7349000FEADE /* CompactView.xib */; };
+ 		F575C1D81E4E7433000FEADE /* CompactView.m in Sources */ = {isa = PBXBuildFile; fileRef = F575C1D71E4E7433000FEADE /* CompactView.m */; };
+ 		F57A430A1E336D650046A37F /* IpadMessageLabel.m in Sources */ = {isa = PBXBuildFile; fileRef = F57A43091E336D650046A37F /* IpadMessageLabel.m */; };
+ 		F5A42CBD1E2ECA1E007228BF /* DefaultFastOperationsDataSource.m in Sources */ = {isa = PBXBuildFile; fileRef = F5A42CBC1E2ECA1E007228BF /* DefaultFastOperationsDataSource.m */; };
++		F5B06BFE1E78AC8500A7F11A /* SmsNumber.m in Sources */ = {isa = PBXBuildFile; fileRef = F5B06BFD1E78AC8500A7F11A /* SmsNumber.m */; };
+ 		F5B178671E1F6EE9000018C3 /* LENumberPadCollectionViewCell.m in Sources */ = {isa = PBXBuildFile; fileRef = F5B178661E1F6EE9000018C3 /* LENumberPadCollectionViewCell.m */; };
+ 		F5B1786A1E1F712B000018C3 /* UIImage+LENumberPad.m in Sources */ = {isa = PBXBuildFile; fileRef = F5B178691E1F712B000018C3 /* UIImage+LENumberPad.m */; };
+ 		F5B1786D1E1F71E5000018C3 /* LENumberPad.m in Sources */ = {isa = PBXBuildFile; fileRef = F5B1786C1E1F71E5000018C3 /* LENumberPad.m */; };
+@@ -1779,6 +1784,8 @@
+ 		F50AE6C21E28FB1800AC1A65 /* OperationsViewController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = OperationsViewController.m; sourceTree = "<group>"; };
+ 		F50AE6C41E294A1C00AC1A65 /* FastOperations.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FastOperations.h; sourceTree = "<group>"; };
+ 		F50AE6C51E294A1C00AC1A65 /* FastOperations.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = FastOperations.m; sourceTree = "<group>"; };
++		F53335641E7C701300E171E6 /* MaxObjectId.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MaxObjectId.h; sourceTree = "<group>"; };
++		F53335651E7C701300E171E6 /* MaxObjectId.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MaxObjectId.m; sourceTree = "<group>"; };
+ 		F55A5D311E2BEA3A003D3E21 /* HomeAccounting.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = HomeAccounting.entitlements; path = HomeAccounting/HomeAccounting.entitlements; sourceTree = "<group>"; };
+ 		F55A5D561E2BF888003D3E21 /* HomeAccountingTodayExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HomeAccountingTodayExtension.entitlements; sourceTree = "<group>"; };
+ 		F56D105B1E1E540F00ADAB7A /* HomeAccountingTodayExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HomeAccountingTodayExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+@@ -1789,6 +1796,12 @@
+ 		F56D10651E1E541000ADAB7A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+ 		F56D10771E1E582200ADAB7A /* Digits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = Digits.h; sourceTree = "<group>"; };
+ 		F56D10781E1E582200ADAB7A /* Digits.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = Digits.m; sourceTree = "<group>"; };
++		F57048811E7827FC00FF4F08 /* NSString+SMS.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "NSString+SMS.h"; path = "Sms/NSString+SMS.h"; sourceTree = "<group>"; };
++		F57048821E7827FC00FF4F08 /* NSString+SMS.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = "NSString+SMS.m"; path = "Sms/NSString+SMS.m"; sourceTree = "<group>"; };
++		F570488A1E78327000FF4F08 /* SmsHistory.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = SmsHistory.h; path = Sms/SmsHistory.h; sourceTree = "<group>"; };
++		F570488B1E78327000FF4F08 /* SmsHistory.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = SmsHistory.m; path = Sms/SmsHistory.m; sourceTree = "<group>"; };
++		F570488D1E783DF800FF4F08 /* SmsSynchronization.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SmsSynchronization.h; sourceTree = "<group>"; };
++		F570488E1E783DF800FF4F08 /* SmsSynchronization.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SmsSynchronization.m; sourceTree = "<group>"; };
+ 		F575C1CF1E4E69B8000FEADE /* PleaseLoginView.xib */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.xib; path = PleaseLoginView.xib; sourceTree = "<group>"; };
+ 		F575C1D11E4E6A2E000FEADE /* PleaseLoginView.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PleaseLoginView.h; sourceTree = "<group>"; };
+ 		F575C1D21E4E6A2E000FEADE /* PleaseLoginView.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = PleaseLoginView.m; sourceTree = "<group>"; };
+@@ -1801,6 +1814,8 @@
+ 		F57A43091E336D650046A37F /* IpadMessageLabel.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IpadMessageLabel.m; sourceTree = "<group>"; };
+ 		F5A42CBB1E2ECA1E007228BF /* DefaultFastOperationsDataSource.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DefaultFastOperationsDataSource.h; sourceTree = "<group>"; };
+ 		F5A42CBC1E2ECA1E007228BF /* DefaultFastOperationsDataSource.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DefaultFastOperationsDataSource.m; sourceTree = "<group>"; };
++		F5B06BFC1E78AC8500A7F11A /* SmsNumber.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = SmsNumber.h; path = Sms/SmsNumber.h; sourceTree = "<group>"; };
++		F5B06BFD1E78AC8500A7F11A /* SmsNumber.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = SmsNumber.m; path = Sms/SmsNumber.m; sourceTree = "<group>"; };
+ 		F5B178651E1F6EE9000018C3 /* LENumberPadCollectionViewCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LENumberPadCollectionViewCell.h; sourceTree = "<group>"; };
+ 		F5B178661E1F6EE9000018C3 /* LENumberPadCollectionViewCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = LENumberPadCollectionViewCell.m; sourceTree = "<group>"; };
+ 		F5B178681E1F70D8000018C3 /* UIImage+LENumberPad.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UIImage+LENumberPad.h"; sourceTree = "<group>"; };
+@@ -1893,6 +1908,7 @@
+ 				DF9A8D31160B689800A33E03 /* ConnectionProviding */,
+ 				DF9A8D36160B689800A33E03 /* DataProviding */,
+ 				DFA4DE9C175C90F2007CB057 /* Reachability */,
++				F57048801E7827DA00FF4F08 /* Sms */,
+ 				1D3623240D0F684500981E51 /* HomeAccountingAppDelegate.h */,
+ 				1D3623250D0F684500981E51 /* HomeAccountingAppDelegate.m */,
+ 				445558A61892A03B00E65AC7 /* SerialViewConstructor.h */,
+@@ -2816,6 +2832,8 @@
+ 				8BB5ED3314DC0DF4004DB5FB /* HistoryCoreDataStorage.m */,
+ 				8BA5969814F8D4790028FD7F /* UIUpdateStorage.h */,
+ 				8BA5969914F8D4790028FD7F /* UIUpdateStorage.m */,
++				F53335641E7C701300E171E6 /* MaxObjectId.h */,
++				F53335651E7C701300E171E6 /* MaxObjectId.m */,
+ 			);
+ 			name = CoreDataStorage;
+ 			sourceTree = "<group>";
+@@ -3415,6 +3433,21 @@
+ 			path = HomeAccountingTodayExtension;
+ 			sourceTree = "<group>";
+ 		};
++		F57048801E7827DA00FF4F08 /* Sms */ = {
++			isa = PBXGroup;
++			children = (
++				F5B06BFC1E78AC8500A7F11A /* SmsNumber.h */,
++				F5B06BFD1E78AC8500A7F11A /* SmsNumber.m */,
++				F570488A1E78327000FF4F08 /* SmsHistory.h */,
++				F570488B1E78327000FF4F08 /* SmsHistory.m */,
++				F57048811E7827FC00FF4F08 /* NSString+SMS.h */,
++				F57048821E7827FC00FF4F08 /* NSString+SMS.m */,
++				F570488D1E783DF800FF4F08 /* SmsSynchronization.h */,
++				F570488E1E783DF800FF4F08 /* SmsSynchronization.m */,
++			);
++			name = Sms;
++			sourceTree = "<group>";
++		};
+ 		F5B178641E1F6EB0000018C3 /* NumberPad */ = {
+ 			isa = PBXGroup;
+ 			children = (
+@@ -4226,6 +4259,7 @@
+ 				89C8518B135EF7E500E3F15B /* MoveMoneyViewCell.m in Sources */,
+ 				89C8518F135EF82600E3F15B /* SyncFunc.m in Sources */,
+ 				89C85194135EF87700E3F15B /* Server.m in Sources */,
++				F57048831E7827FC00FF4F08 /* NSString+SMS.m in Sources */,
+ 				89C85195135EF87700E3F15B /* SOAP.m in Sources */,
+ 				89C85198135EF88300E3F15B /* ConnectionDelegate.m in Sources */,
+ 				89C8519B135EF89300E3F15B /* Notifications.m in Sources */,
+@@ -4253,6 +4287,7 @@
+ 				8BBBD1D913D02BDC00788CF0 /* BalanceRepositoryViewCell.m in Sources */,
+ 				8B8EBD2B13FE8BB500E91A56 /* MyAlertView.m in Sources */,
+ 				8B8A2ABA14569E5E001A3BA1 /* WaitingHistoryViewCell.m in Sources */,
++				F570488C1E78327000FF4F08 /* SmsHistory.m in Sources */,
+ 				8B8A2AC31456A027001A3BA1 /* UpdateBalanceViewCell.m in Sources */,
+ 				8B86347D14C036C70018CD75 /* ASIAuthenticationDialog.m in Sources */,
+ 				8B86347E14C036C70018CD75 /* ASIDataCompressor.m in Sources */,
+@@ -4276,14 +4311,17 @@
+ 				8B7A62EC14C70DC1001FA655 /* YearHistoryDS.m in Sources */,
+ 				8BF10D8F14C8006A004B99F1 /* HomeAccounting.xcdatamodeld in Sources */,
+ 				8B185B8514C843990097C864 /* BaseCoreDataStorage.m in Sources */,
++				F53335661E7C701300E171E6 /* MaxObjectId.m in Sources */,
+ 				12DAAB9C1AB17ED800296D19 /* PlaceIconDataProvider.m in Sources */,
+ 				84CDCC671A65480D00686B94 /* BundleEx.m in Sources */,
+ 				8BE4FD5314C864A700DDEB93 /* SyncCoreDataStorage.m in Sources */,
+ 				8BE4FD8514C8763B00DDEB93 /* SyncCDFacade.m in Sources */,
+ 				8B1CF72214CF05C500E23990 /* BalanceCoreDataStorage.m in Sources */,
++				F5B06BFE1E78AC8500A7F11A /* SmsNumber.m in Sources */,
+ 				F5B178781E1F9F26000018C3 /* AppURLParser.m in Sources */,
+ 				8BAAAC4C14D187D600CF7E6F /* UICoreDataStorage.m in Sources */,
+ 				8BAF798414D6B9F3006DD053 /* ChangeList.m in Sources */,
++				F570488F1E783DF800FF4F08 /* SmsSynchronization.m in Sources */,
+ 				F50AE6C61E294A1C00AC1A65 /* FastOperations.m in Sources */,
+ 				8BB5ED3414DC0DF4004DB5FB /* HistoryCoreDataStorage.m in Sources */,
+ 				8BB5ED3814DC123D004DB5FB /* HistoryCoreDataFacade.m in Sources */,
+diff --git a/en.lproj/Localizable.strings b/en.lproj/Localizable.strings
+index e0534cf..58bea6a 100644
+--- a/en.lproj/Localizable.strings
++++ b/en.lproj/Localizable.strings
+@@ -548,6 +548,7 @@
+ "Server accepted currency list"     = "Server accepted currency list";
+ "Server accepted record list"       = "Server accepted record list";
+ "Balance data is received"          = "Balance data is received";
++"Parsed text data is received"      = "Parsed text data is received";
+ 
+ "Receiving dictionaries and records" = "Receiving dictionaries and records";
+ "Receiving server changes" = "Receiving server changes";
+diff --git a/ru.lproj/Localizable.strings b/ru.lproj/Localizable.strings
+index 807d80d..e146a5e 100644
+--- a/ru.lproj/Localizable.strings
++++ b/ru.lproj/Localizable.strings
+@@ -505,6 +505,7 @@
+ "Server accepted currency list"     = "Передан список валют";
+ "Server accepted record list"       = "Передан список записей";
+ "Balance data is received"          = "Получены данные баланса";
++"Parsed text data is received"      = "Получены данные SMS синхронизации";
+ 
+ "Receiving dictionaries and records" = "Получение справочников и записей";
+ "Receiving server changes" = "Получение изменений с сервера";
